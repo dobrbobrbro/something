@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <commdlg.h>
 
+
 UIContentBrowser::UIContentBrowser()
 {
     m_CurrentPath.clear();
@@ -62,7 +63,7 @@ void UIContentBrowser::Draw()
     ImGui::Columns(2, nullptr, true);
     ImGui::SetColumnWidth(0, 230.0f);
 
-    // ==== Ëåâàÿ êîëîíêà: ñïèñîê ====
+    // ==== Ð›ÐµÐ²Ð°Ñ ÐºÐ¾Ð»Ð¾Ð½ÐºÐ°: ÑÐ¿Ð¸ÑÐ¾Ðº ====
     {
         ImGui::BeginChild("Object List", ImVec2(0, 0), true, ImGuiWindowFlags_NoScrollbar);
         ImGui::BeginGroup();
@@ -87,7 +88,7 @@ void UIContentBrowser::Draw()
         ImGui::EndGroup();
         ImGui::EndChild();
 
-        // Ñèíõðîíèçàöèÿ: èç ëåâîãî ñïèñêà ïðàâûé
+        // Ð¡Ð¸Ð½Ñ…Ñ€Ð¾Ð½Ð¸Ð·Ð°Ñ†Ð¸Ñ: Ð¸Ð· Ð»ÐµÐ²Ð¾Ð³Ð¾ ÑÐ¿Ð¸ÑÐºÐ° Ð¿Ñ€Ð°Ð²Ñ‹Ð¹
         RStringVec selectedItems;
         if (m_ObjectList->GetSelected(selectedItems) && !selectedItems.empty()) {
             xr_string sel = selectedItems[0].c_str();
@@ -105,7 +106,7 @@ void UIContentBrowser::Draw()
         }
     }
 
-    // ==== Ïðàâàÿ êîëîíêà: ïðåâüþ ====
+    // ==== ÐŸÑ€Ð°Ð²Ð°Ñ ÐºÐ¾Ð»Ð¾Ð½ÐºÐ°: Ð¿Ñ€ÐµÐ²ÑŒÑŽ ====
     ImGui::NextColumn();
     ImGui::Text("Path: %s", m_CurrentPath.c_str());
 
@@ -216,7 +217,7 @@ void UIContentBrowser::Draw()
 
             bool isSelected = (m_SelectedItem == item.name);
             float totalHeight = tileSize + ImGui::GetTextLineHeightWithSpacing();
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY()); // Ensure alignment starts at current position
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(135.0f / 255.0f, 206.0f / 255.0f, 235.0f / 255.0f, 0.5f));
             if (ImGui::Selectable("##selectable", isSelected, ImGuiSelectableFlags_AllowDoubleClick | ImGuiSelectableFlags_AllowItemOverlap, ImVec2(tileSize + 10, totalHeight)))
             {
                 m_SelectedItem = item.name;
@@ -232,6 +233,7 @@ void UIContentBrowser::Draw()
                 if (ImGui::IsMouseDoubleClicked(0))
                     OnItemClicked(item.name, item.isFolder);
             }
+            ImGui::PopStyleColor();
 
             ImTextureID iconID = item.isFolder ? m_tFolder->surface_get() : m_TextureNull->surface_get();
             if (!item.isFolder)
@@ -241,7 +243,6 @@ void UIContentBrowser::Draw()
                     iconID = it->second;
             }
 
-            ImGui::SetCursorPosY(ImGui::GetCursorPosY()); // Align thumbnail under selectable
             if (ImGui::ImageButton(iconID, ImVec2(tileSize, tileSize)))
             {
                 m_SelectedItem = item.name;
@@ -275,6 +276,7 @@ void UIContentBrowser::Draw()
             }
 
             ImGui::TextWrapped("%s", item.name.c_str());
+
             ImGui::PopID();
             ImGui::EndGroup();
         }
@@ -286,7 +288,7 @@ void UIContentBrowser::Draw()
     ImGui::Columns(1);
     ImGui::PopStyleVar();
 
-    // ==== Îáðàáîòêà ðåçóëüòàòà âûáîðà ====
+    // ==== ÐžÐ±Ñ€Ð°Ð±Ð¾Ñ‚ÐºÐ° Ñ€ÐµÐ·ÑƒÐ»ÑŒÑ‚Ð°Ñ‚Ð° Ð²Ñ‹Ð±Ð¾Ñ€Ð° ====
     if (m_Selection)
     {
         bool change = false;
@@ -329,7 +331,7 @@ void UIContentBrowser::Draw()
         UIChooseForm::Update();
     }
 
-    // ==== Ðàçìåùåíèå îáúåêòà òîëüêî ïðè ÿâíîì êëèêå ìûøè, åñëè íå áûëà íàæàòà êíîïêà Add ====
+    // ==== Ð Ð°Ð·Ð¼ÐµÑ‰ÐµÐ½Ð¸Ðµ Ð¾Ð±ÑŠÐµÐºÑ‚Ð° Ñ‚Ð¾Ð»ÑŒÐºÐ¾ Ð¿Ñ€Ð¸ ÑÐ²Ð½Ð¾Ð¼ ÐºÐ»Ð¸ÐºÐµ Ð¼Ñ‹ÑˆÐ¸, ÐµÑÐ»Ð¸ Ð½Ðµ Ð±Ñ‹Ð»Ð° Ð½Ð°Ð¶Ð°Ñ‚Ð° ÐºÐ½Ð¾Ð¿ÐºÐ° Add ====
     if (!m_PendingObject.empty() && Tools->GetAction() == etaAdd && ImGui::IsMouseClicked(0) && !m_AddButtonClicked)
     {
         // Validate m_PendingObject before adding
