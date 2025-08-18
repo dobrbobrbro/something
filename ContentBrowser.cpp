@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <windows.h>
 #include <commdlg.h>
-#include "..//Editors/xrEUI/imgui.h"
 
 
 UIContentBrowser::UIContentBrowser()
@@ -22,7 +21,6 @@ UIContentBrowser::UIContentBrowser()
     m_ObjectList = xr_new<UIItemListForm>();
     m_TextureNull.create("\\ed\\ed_nodata");
     m_TextureNull->Load();
-
     if (FS.exist("$game_textures$", "ed\\bar\\rollic\\contentbrowser\\folder.dds"))
         m_tFolder.create("ed\\bar\\rollic\\contentbrowser\\folder.dds");
     else
@@ -56,13 +54,10 @@ UIContentBrowser::~UIContentBrowser()
 
 void UIContentBrowser::Draw()
 {
-
-
     static bool showWindow = true;
     ImGui::Begin("Content Browser", &showWindow, ImGuiWindowFlags_None);
 
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
-
     ImGui::Columns(2, nullptr, true);
     ImGui::SetColumnWidth(0, 230.0f);
 
@@ -75,7 +70,6 @@ void UIContentBrowser::Draw()
         ImGui::SetNextItemWidth(search_width);
         char buffer[256];
         xr_strcpy(buffer, m_SearchQuery.c_str());
-
         if (ImGui::InputTextWithHint("##Search", "Search", buffer, sizeof(buffer))) {
             m_SearchQuery = buffer;
             RefreshList();
@@ -90,7 +84,6 @@ void UIContentBrowser::Draw()
         ImGui::Separator();
         ImGui::EndGroup();
         ImGui::EndChild();
-
         // Синхронизация: из левого списка правый
         RStringVec selectedItems;
         if (m_ObjectList->GetSelected(selectedItems) && !selectedItems.empty()) {
@@ -102,7 +95,11 @@ void UIContentBrowser::Draw()
                 if (objTool && objTool->pForm) {
                     UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
                     if (uiObjTool) {
-                        uiObjTool->SetCurrent(m_SelectedItem.c_str());
+                        // ИСПРАВЛЕНО: Формируем полный путь, НЕ удаляя расширение
+                        xr_string fullPath = m_CurrentPath;
+                        if (!fullPath.empty()) fullPath += "\\";
+                        fullPath += m_SelectedItem;
+                        uiObjTool->SetCurrent(fullPath.c_str());
                     }
                 }
             }
@@ -137,9 +134,9 @@ void UIContentBrowser::Draw()
     {
         m_Selection = true;
         m_AddButtonClicked = true;
+        // ИСПРАВЛЕНО: Формируем полный путь, НЕ удаляя расширение для ChooseForm
         xr_string fullPath = m_CurrentPath;
-        if (!fullPath.empty())
-            fullPath += "\\";
+        if (!fullPath.empty()) fullPath += "\\";
         fullPath += m_SelectedItem;
         UIChooseForm::SelectItem(smObject, 1, fullPath.c_str());
     }
@@ -205,27 +202,10 @@ void UIContentBrowser::Draw()
             }
         }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Rename", ImVec2(80, 20)) && !m_SelectedItem.empty())
-    {
-        static char renameBuffer[256] = "";
-        xr_strcpy(renameBuffer, m_SelectedItem.c_str());
-        ImGui::OpenPopup("RenamePopup");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Delete", ImVec2(80, 20)) && !m_SelectedItem.empty())
-    {
-        ImGui::OpenPopup("DeletePopup");
-    }
-
-
-
     ImGui::BeginChild("Content", ImVec2(0, 0), true);
-
     const float tileSize = 100.0f;
     int columns = std::max(1, (int)(ImGui::GetContentRegionAvail().x / (tileSize + 10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
-
     if (ImGui::BeginTable("ContentTable", columns, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoPadOuterX))
     {
         for (auto& item : m_Items)
@@ -234,6 +214,46 @@ void UIContentBrowser::Draw()
             ImGui::BeginGroup();
             ImGui::PushID(item.name.c_str());
 
+            // --- размеры общей выделяемой области (thumbnail + подпись) ---
+            const float pad = 5.0f;
+            ImVec2 selectableSize(tileSize + 2 * pad, tileSize + ImGui::GetTextLineHeightWithSpacing() + 2 * pad);
+            bool isSelected = (m_SelectedItem == item.name);
+            // 1) Большая выделяемая зона: СЕРАЯ ПОДСВЕТКА на всю плитку
+            if (ImGui::Selectable("##selectable",
+                isSelected,
+                ImGuiSelectableFlags_AllowDoubleClick | ImGuiSelectableFlags_AllowItemOverlap,
+                selectableSize))
+            {
+
+                m_SelectedItem = item.name;
+
+                // --- НЕ УДАЛЯТЬ: синхронизация с левым списком ---
+                m_ObjectList->SelectItem(item.name.c_str());
+                // --- НЕ УДАЛЯТЬ: обновление UIObjectTool выбранного элемента ---
+                if (ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT)))
+                    if (objTool->pForm)
+                        if (UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm))
+
+                        {
+                            // ИСПРАВЛЕНО: Формируем полный путь, НЕ удаляя расширение
+                            xr_string fullPath = m_CurrentPath;
+                            if (!fullPath.empty()) fullPath += "\\";
+                            fullPath += m_SelectedItem;
+                            uiObjTool->SetCurrent(fullPath.c_str());
+                        }
+
+                if (ImGui::IsMouseDoubleClicked(0))
+                    OnItemClicked(item.name, item.isFolder);
+            }
+
+            // 2) Рисуем содержимое ВНУТРИ выделенной зоны
+            ImVec2 rectMin = ImGui::GetItemRectMin();
+            ImVec2 cur = rectMin;         // верхний-левый угол выделения
+            cur.x += pad;
+            cur.y += pad;
+
+            // --- картинка (thumbnail) ---
+            ImGui::SetCursorScreenPos(cur);
             ImTextureID iconID = item.isFolder ? m_tFolder->surface_get() : m_TextureNull->surface_get();
             if (!item.isFolder)
             {
@@ -245,28 +265,29 @@ void UIContentBrowser::Draw()
             if (ImGui::ImageButton(iconID, ImVec2(tileSize, tileSize)))
             {
                 m_SelectedItem = item.name;
+                // --- НЕ УДАЛЯТЬ: синхронизация с левым списком ---
                 m_ObjectList->SelectItem(item.name.c_str());
-                // Update UIObjectTool with the selected item
-                ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
-                if (objTool && objTool->pForm) {
-                    UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
-                    if (uiObjTool) {
-                        uiObjTool->SetCurrent(m_SelectedItem.c_str());
-                    }
-                }
-                if (!item.isFolder) {
+                // --- НЕ УДАЛЯТЬ: обновление UIObjectTool выбранного элемента ---
+                if (ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT)))
+                    if (objTool->pForm)
+                        if (UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm))
+
+                        {
+                            // ИСПРАВЛЕНО: Формируем полный путь, НЕ удаляя расширение
+                            xr_string fullPath = m_CurrentPath;
+                            if (!fullPath.empty()) fullPath += "\\";
+                            fullPath += m_SelectedItem;
+                            uiObjTool->SetCurrent(fullPath.c_str());
+                        }
+
+                if (!item.isFolder && !m_Selection)
+                {
+                    m_Selection = true;
+                    // ИСПРАВЛЕНО: Формируем полный путь, НЕ удаляя расширение для ChooseForm
                     xr_string fullPath = m_CurrentPath;
                     if (!fullPath.empty()) fullPath += "\\";
                     fullPath += item.name;
-                    // Validate path before setting m_PendingObject
-                    xr_string normalizedPath = fullPath;
-                    while (!normalizedPath.empty() && (normalizedPath[0] == '\\' || normalizedPath[0] == '/'))
-                        normalizedPath.erase(0, 1);
-                    std::replace(normalizedPath.begin(), normalizedPath.end(), '/', '\\');
-                    if (FS.exist("$fs_root$", normalizedPath.c_str()) || FS.exist("$game_data$", normalizedPath.c_str()))
-                    {
-                        m_PendingObject = normalizedPath;
-                    }
+                    UIChooseForm::SelectItem(smObject, 1, fullPath.c_str());
                 }
                 else if (item.isFolder)
                 {
@@ -274,13 +295,15 @@ void UIContentBrowser::Draw()
                 }
             }
 
+            // --- подпись под картинкой ---
+            ImGui::SetCursorScreenPos(ImVec2(cur.x, cur.y + tileSize + 2.0f));
             ImGui::TextWrapped("%s", item.name.c_str());
 
             ImGui::PopID();
             ImGui::EndGroup();
+
         }
         ImGui::EndTable();
-
     }
     ImGui::PopStyleVar();
 
@@ -292,16 +315,39 @@ void UIContentBrowser::Draw()
     if (m_Selection)
     {
         bool change = false;
-        xr_string result;
+        xr_string result; // Сюда приходит "чистое" имя, например, "bb"
         if (UIChooseForm::GetResult(change, result))
         {
             if (change)
             {
-                // Validate result path before setting m_PendingObject
+                // ИСПРАВЛЕНО: Восстанавливаем полное имя файла, если расширение отсутствует
+                xr_string finalPath = result;
+                
+                // Проверяем, есть ли в имени точка (признак расширения)
+                if (strrchr(finalPath.c_str(), '.') == nullptr)
+                {
+                    // Расширения нет. Пробуем добавить стандартные.
+                    xr_string path_with_object_ext = finalPath + ".object";
+                    if (FS.exist("$fs_root$", path_with_object_ext.c_str()) || FS.exist("$game_data$", path_with_object_ext.c_str()))
+                    {
+                        finalPath = path_with_object_ext;
+                    }
+                    else
+                    {
+                        xr_string path_with_ogf_ext = finalPath + ".ogf";
+                        if (FS.exist("$fs_root$", path_with_ogf_ext.c_str()) || FS.exist("$game_data$", path_with_ogf_ext.c_str()))
+                        {
+                            finalPath = path_with_ogf_ext;
+                        }
+                    }
+                }
+
+                // Теперь используем finalPath, который должен содержать расширение
                 xr_string normalizedResult = result;
                 while (!normalizedResult.empty() && (normalizedResult[0] == '\\' || normalizedResult[0] == '/'))
                     normalizedResult.erase(0, 1);
                 std::replace(normalizedResult.begin(), normalizedResult.end(), '/', '\\');
+
                 if (FS.exist("$fs_root$", normalizedResult.c_str()) || FS.exist("$game_data$", normalizedResult.c_str()))
                 {
                     m_PendingObject = normalizedResult;
@@ -323,6 +369,7 @@ void UIContentBrowser::Draw()
                 }
                 else
                 {
+                    // В сообщении об ошибке выводим исходное имя, чтобы было понятно, что не нашлось
                     ELog.DlgMsg(mtError, "Selected object does not exist: %s", normalizedResult.c_str());
                 }
             }
@@ -356,9 +403,7 @@ void UIContentBrowser::Draw()
     }
 
     m_AddButtonClicked = false;
-
     ImGui::End();
-
 }
 
 void UIContentBrowser::RefreshList()
@@ -367,52 +412,47 @@ void UIContentBrowser::RefreshList()
         return;
 
     m_RefreshInProgress = true;
-
-    // Очистка текущего списка объектов
-    m_ObjectList->ClearList();
-
-    // Подготовка пути для перечисления файлов
-    string_path path;
-    xr_strcpy(path, m_CurrentPath.empty() ? "rawdata\\objects" : m_CurrentPath.c_str());
-
-    // Перечисление папок и файлов
-    FS_FileSet files;
-    FS.file_list(files, "$fs_root$", FS_ListFiles | FS_ListFolders, "*");
-
+    m_Items.clear();
     ListItemsVec items;
-    for (const FS_File& file : files)
+    FS_FileSet lst;
+    if (Lib.GetObjects(lst))
     {
-        xr_string itemName = file.name.c_str();
-        // Применение фильтра поиска, если он есть
-        if (!m_SearchQuery.empty() && itemName.find(m_SearchQuery) == xr_string::npos)
-            continue;
-
-        // Проверка, является ли элемент папкой
-        string_path fullPath;
-        xr_strcpy(fullPath, path);
-        if (fullPath[xr_strlen(fullPath) - 1] != '\\')
-            xr_strcat(fullPath, "\\");
-        xr_strcat(fullPath, file.name.c_str());
-
-        if (FS.exist("$fs_root$", fullPath))
+        for (const auto& file : lst)
         {
-            EItemType itemType = (file.attrib & FILE_ATTRIBUTE_DIRECTORY) ? TYPE_FOLDER : TYPE_OBJECT;
-            ListItem* item = xr_new<ListItem>(itemType);
-            item->SetName(itemName.c_str());
-            items.push_back(item);
+            xr_string relativeName = file.name;
+            if (!m_CurrentPath.empty())
+            {
+                if (relativeName.find(m_CurrentPath + "\\") != 0)
+                    continue;
+                relativeName = relativeName.substr(m_CurrentPath.length() + 1);
+            }
+
+            size_t pos = relativeName.find('\\');
+            Item item;
+            item.isFolder = pos != xr_string::npos;
+            item.name = item.isFolder ? relativeName.substr(0, pos) : relativeName;
+            if (!m_SearchQuery.empty() && relativeName.find(m_SearchQuery) == xr_string::npos)
+                continue;
+            auto it = std::find_if(m_Items.begin(), m_Items.end(),
+                [&item](const Item& i) { return i.name == item.name && i.isFolder == item.isFolder; });
+            if (it == m_Items.end())
+                m_Items.push_back(item);
+            if (!item.isFolder)
+                LHelper().CreateItem(items, relativeName.c_str(), 0, ListItem::flDrawThumbnail, 0);
         }
     }
 
-    // Сортировка элементов: папки первыми, затем по алфавиту
-    std::sort(items.begin(), items.end(), [](const ListItem* a, const ListItem* b) -> bool {
-        if (a->Type() != b->Type())
-            return a->Type() < b->Type();
-        return xr_strcmp(a->Key(), b->Key()) < 0;
+    std::sort(m_Items.begin(), m_Items.end(),
+        [](const Item& a, const Item& b)
+        {
+            if (a.isFolder == b.isFolder)
+                return a.name < b.name;
+            return a.isFolder > b.isFolder;
         });
-
-    // Назначение элементов в список
-    m_ObjectList->AssignItems(items, nullptr, true, false);
-
+    for (auto& item : m_Items)
+        if (!item.isFolder)
+            LoadThumbnail(item.name);
+    m_ObjectList->AssignItems(items);
     m_RefreshInProgress = false;
 }
 
@@ -424,7 +464,6 @@ void UIContentBrowser::OnItemClicked(const xr_string& item, bool isFolder)
         if (!newPath.empty())
             newPath += "\\";
         newPath += item;
-
         FS_FileSet lst;
         if (Lib.GetObjects(lst))
         {
@@ -451,12 +490,15 @@ void UIContentBrowser::OnItemClicked(const xr_string& item, bool isFolder)
     else if (!isFolder)
     {
         m_SelectedItem = item;
-        // Update UIObjectTool with the selected item
         ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
         if (objTool && objTool->pForm) {
             UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
             if (uiObjTool) {
-                uiObjTool->SetCurrent(m_SelectedItem.c_str());
+                // ИСПРАВЛЕНО: Формируем полный путь, НЕ удаляя расширение
+                xr_string fullPath = m_CurrentPath;
+                if (!fullPath.empty()) fullPath += "\\";
+                fullPath += m_SelectedItem;
+                  uiObjTool->SetCurrent(m_SelectedItem.c_str());
             }
         }
     }
@@ -466,7 +508,6 @@ void UIContentBrowser::LoadThumbnail(const xr_string& name)
 {
     if (m_PreviewCache.find(name) != m_PreviewCache.end())
         return;
-
     ImTextureID imgID = nullptr;
     SChooseEvents* e = UIChooseForm::GetEvents(smObject);
     if (e && !e->on_get_texture.empty())
@@ -484,7 +525,6 @@ void UIContentBrowser::LoadThumbnail(const xr_string& name)
         xr_string textureName = name;
         if (textureName.size() >= 4 && textureName.substr(textureName.size() - 4) == ".thm")
             textureName = textureName.substr(0, textureName.size() - 4);
-
         xr_string basePath = "rawdata\\objects\\";
         if (!m_CurrentPath.empty())
             basePath += m_CurrentPath + "\\";
@@ -537,7 +577,6 @@ void UIContentBrowser::AddObjectToScene(const xr_string& itemName, const Fvector
 {
     if (itemName.empty())
         return;
-
     // Normalize path for engine compatibility
     xr_string normalizedPath = itemName;
     while (!normalizedPath.empty() && (normalizedPath[0] == '\\' || normalizedPath[0] == '/'))
@@ -555,7 +594,6 @@ void UIContentBrowser::AddObjectToScene(const xr_string& itemName, const Fvector
     Scene->GenObjectName(OBJCLASS_SCENEOBJECT, namebuffer, normalizedPath.c_str());
     CSceneObject* obj = xr_new<CSceneObject>((LPVOID)0, namebuffer);
     CEditableObject* ref = obj->SetReference(normalizedPath.c_str());
-
     if (!ref)
     {
         ELog.DlgMsg(mtError, "Failed to load object: %s", normalizedPath.c_str());
@@ -568,7 +606,6 @@ void UIContentBrowser::AddObjectToScene(const xr_string& itemName, const Fvector
     Scene->AppendObject(obj);
     Scene->SelectObjects(false, OBJCLASS_SCENEOBJECT);
     obj->Select(true);
-
     // Update UIObjectTool with the selected item
     ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
     if (objTool && objTool->pForm) {
