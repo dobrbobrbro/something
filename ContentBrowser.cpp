@@ -8,7 +8,8 @@
 #include <windows.h>
 #include <commdlg.h>
 #include "..//Editors/xrEUI/imgui.h"
-
+#include <shlwapi.h> // Для PathFileExistsA
+#pragma comment(lib, "Shlwapi.lib") // Линковка с Shlwapi.lib
 
 UIContentBrowser::UIContentBrowser()
 {
@@ -136,8 +137,7 @@ void UIContentBrowser::Draw()
         m_Selection = true;
         m_AddButtonClicked = true;
         xr_string fullPath = m_CurrentPath;
-        if (!fullPath.empty())
-            fullPath += "\\";
+        if (!fullPath.empty()) fullPath += "\\";
         fullPath += m_SelectedItem;
         UIChooseForm::SelectItem(smObject, 1, fullPath.c_str());
     }
@@ -215,6 +215,7 @@ void UIContentBrowser::Draw()
     {
         ImGui::OpenPopup("DeletePopup");
     }
+
     // Rename popup
     if (ImGui::BeginPopupModal("RenamePopup", NULL, ImGuiWindowFlags_AlwaysAutoResize))
     {
@@ -225,24 +226,33 @@ void UIContentBrowser::Draw()
             xr_string oldName = m_SelectedItem;
             xr_string newName = renameBuffer;
 
-            xr_string fullOldPath = "E:\\HSDK\\rawdata\\objects\\" + m_CurrentPath + (m_CurrentPath.empty() ? "" : "\\") + oldName;
-            xr_string fullNewPath = "E:\\HSDK\\rawdata\\objects\\" + m_CurrentPath + (m_CurrentPath.empty() ? "" : "\\") + newName;
+            xr_string basePath = "E:\\HSDK\\rawdata\\objects\\";
+            xr_string fullOldPath = basePath + (m_CurrentPath.empty() ? "" : m_CurrentPath + "\\") + oldName;
+            xr_string fullNewPath = basePath + (m_CurrentPath.empty() ? "" : m_CurrentPath + "\\") + newName;
 
-            ELog.Msg(mtInformation, "Old path: %s", fullOldPath.c_str());
+            ELog.Msg(mtInformation, "Attempting rename at 04:35 AM EDT, Old path: %s", fullOldPath.c_str());
             ELog.Msg(mtInformation, "New path: %s", fullNewPath.c_str());
 
-            if (MoveFileA(fullOldPath.c_str(), fullNewPath.c_str()))
+            if (PathFileExistsA(fullOldPath.c_str()))
             {
-                m_SelectedItem = newName;
-                m_Items.clear();
+                if (MoveFileA(fullOldPath.c_str(), fullNewPath.c_str()))
+                {
+                    ELog.Msg(mtInformation, "Rename successful at 04:35 AM EDT");
+                    m_SelectedItem = newName;
+                    m_Items.clear();
 #ifdef FS_RESCAN_PATH
-                FS.rescan_path("$fs_root$");
+                    FS.rescan_path("$fs_root$");
 #endif
-                RefreshList();
+                    RefreshList();
+                }
+                else
+                {
+                    ELog.DlgMsg(mtError, "Failed to rename %s to %s: Error %d", fullOldPath.c_str(), fullNewPath.c_str(), GetLastError());
+                }
             }
             else
             {
-                ELog.DlgMsg(mtError, "Failed to rename %s to %s: Error %d", fullOldPath.c_str(), fullNewPath.c_str(), GetLastError());
+                ELog.DlgMsg(mtError, "File not found at 04:35 AM EDT: %s", fullOldPath.c_str());
             }
             ImGui::CloseCurrentPopup();
         }
@@ -260,29 +270,37 @@ void UIContentBrowser::Draw()
         ImGui::Text("Are you sure you want to delete %s?", m_SelectedItem.c_str());
         if (ImGui::Button("Подтвердить"))
         {
-            xr_string fullPath = m_CurrentPath + (m_CurrentPath.empty() ? "" : "\\") + m_SelectedItem;
+            xr_string fullPath = (m_CurrentPath.empty() ? "" : m_CurrentPath + "\\") + m_SelectedItem;
             xr_string fullDeletePath = "E:\\HSDK\\rawdata\\objects\\" + fullPath;
 
-            ELog.Msg(mtInformation, "Delete path: %s", fullDeletePath.c_str());
+            ELog.Msg(mtInformation, "Attempting delete at 04:35 AM EDT, Delete path: %s", fullDeletePath.c_str());
 
-            FS_FileSet tempSet;
-            int count = FS.file_list(tempSet, fullPath.c_str(), FS_ListFolders);
-            if (count == 0)
+            if (PathFileExistsA(fullDeletePath.c_str()))
             {
-                if (!DeleteFileA(fullDeletePath.c_str()))
-                    ELog.DlgMsg(mtError, "Failed to delete file %s: Error %d", fullDeletePath.c_str(), GetLastError());
+                FS_FileSet tempSet;
+                int count = FS.file_list(tempSet, fullPath.c_str(), FS_ListFolders);
+                if (count == 0)
+                {
+                    if (!DeleteFileA(fullDeletePath.c_str()))
+                        ELog.DlgMsg(mtError, "Failed to delete file %s at 04:35 AM EDT: Error %d", fullDeletePath.c_str(), GetLastError());
+                }
+                else
+                {
+                    if (!RemoveDirectoryA(fullDeletePath.c_str()))
+                        ELog.DlgMsg(mtError, "Failed to delete directory %s at 04:35 AM EDT: Error %d", fullDeletePath.c_str(), GetLastError());
+                }
+                ELog.Msg(mtInformation, "Delete successful at 04:35 AM EDT");
+                m_SelectedItem.clear();
+                m_Items.clear();
+#ifdef FS_RESCAN_PATH
+                FS.rescan_path("$fs_root$");
+#endif
+                RefreshList();
             }
             else
             {
-                if (!RemoveDirectoryA(fullDeletePath.c_str()))
-                    ELog.DlgMsg(mtError, "Failed to delete directory %s: Error %d", fullDeletePath.c_str(), GetLastError());
+                ELog.DlgMsg(mtError, "File/Directory not found at 04:35 AM EDT: %s", fullDeletePath.c_str());
             }
-            m_SelectedItem.clear();
-            m_Items.clear();
-#ifdef FS_RESCAN_PATH
-            FS.rescan_path("$fs_root$");
-#endif
-            RefreshList();
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -331,7 +349,7 @@ void UIContentBrowser::Draw()
                     if (!fullPath.empty()) fullPath += "\\";
                     fullPath += item.name;
                     // Validate path before setting m_PendingObject
-                    xr_string normalizedPath = fullPath;
+                    xr_string normalizedPath = "rawdata\\objects\\" + fullPath;
                     while (!normalizedPath.empty() && (normalizedPath[0] == '\\' || normalizedPath[0] == '/'))
                         normalizedPath.erase(0, 1);
                     std::replace(normalizedPath.begin(), normalizedPath.end(), '/', '\\');
@@ -369,7 +387,7 @@ void UIContentBrowser::Draw()
             if (change)
             {
                 // Validate result path before setting m_PendingObject
-                xr_string normalizedResult = result;
+                xr_string normalizedResult = "rawdata\\objects\\" + result;
                 while (!normalizedResult.empty() && (normalizedResult[0] == '\\' || normalizedResult[0] == '/'))
                     normalizedResult.erase(0, 1);
                 std::replace(normalizedResult.begin(), normalizedResult.end(), '/', '\\');
@@ -394,7 +412,7 @@ void UIContentBrowser::Draw()
                 }
                 else
                 {
-                    ELog.DlgMsg(mtError, "Selected object does not exist: %s", normalizedResult.c_str());
+                    ELog.DlgMsg(mtError, "Selected object does not exist at 04:35 AM EDT: %s", normalizedResult.c_str());
                 }
             }
             m_Selection = false;
@@ -421,7 +439,7 @@ void UIContentBrowser::Draw()
         }
         else
         {
-            ELog.DlgMsg(mtError, "Cannot place object, file does not exist: %s", normalizedPath.c_str());
+            ELog.DlgMsg(mtError, "Cannot place object at 04:35 AM EDT, file does not exist: %s", normalizedPath.c_str());
             m_PendingObject.clear();
         }
     }
@@ -440,18 +458,20 @@ void UIContentBrowser::RefreshList()
 
     ListItemsVec items;
     FS_FileSet lst;
+    xr_string basePath = "rawdata\\objects\\";
+    if (!m_CurrentPath.empty()) basePath += m_CurrentPath + "\\";
+
+    ELog.Msg(mtInformation, "Refreshing list at 04:35 AM EDT, Base path: %s", basePath.c_str());
+
     if (Lib.GetObjects(lst))
     {
         for (const auto& file : lst)
         {
             xr_string relativeName = file.name;
-            if (!m_CurrentPath.empty())
-            {
-                if (relativeName.find(m_CurrentPath + "\\") != 0)
-                    continue;
-                relativeName = relativeName.substr(m_CurrentPath.length() + 1);
-            }
+            if (relativeName.find(basePath) != 0)
+                continue;
 
+            relativeName = relativeName.substr(basePath.length());
             size_t pos = relativeName.find('\\');
             Item item;
             item.isFolder = pos != xr_string::npos;
@@ -468,6 +488,10 @@ void UIContentBrowser::RefreshList()
             if (!item.isFolder)
                 LHelper().CreateItem(items, relativeName.c_str(), 0, ListItem::flDrawThumbnail, 0);
         }
+    }
+    else
+    {
+        ELog.DlgMsg(mtError, "Failed to get objects at 04:35 AM EDT");
     }
 
     std::sort(m_Items.begin(), m_Items.end(),
@@ -564,7 +588,7 @@ void UIContentBrowser::LoadThumbnail(const xr_string& name)
         xr_string ddsPath = basePath + ".dds";
         xr_string tgaPath = basePath + ".tga";
 
-        if (FS.exist("$fs_root$", thmPath.c_str()))
+        if (FS.exist("$game_textures$", thmPath.c_str()))
         {
             EImageThumbnail* thm = ImageLib.CreateThumbnail(basePath.c_str(), EImageThumbnail::ETObject);
             if (thm)
@@ -608,44 +632,53 @@ void UIContentBrowser::AddObjectToScene(const xr_string& itemName, const Fvector
     if (itemName.empty())
         return;
 
+    // Build full relative path from rawdata\objects
+    xr_string fullPath = "rawdata\\objects\\";
+    if (!m_CurrentPath.empty()) fullPath += m_CurrentPath + "\\";
+    fullPath += itemName;
+
     // Normalize path for engine compatibility
-    xr_string normalizedPath = itemName;
+    xr_string normalizedPath = fullPath;
     while (!normalizedPath.empty() && (normalizedPath[0] == '\\' || normalizedPath[0] == '/'))
         normalizedPath.erase(0, 1);
     std::replace(normalizedPath.begin(), normalizedPath.end(), '/', '\\');
 
+    ELog.Msg(mtInformation, "Attempting to add object at 04:35 AM EDT, Path: %s", normalizedPath.c_str());
+
     // Check if the file exists in the engine's file system
-    if (!FS.exist("$fs_root$", normalizedPath.c_str()) && !FS.exist("$game_data$", normalizedPath.c_str()))
+    if (FS.exist("$fs_root$", normalizedPath.c_str()) || FS.exist("$game_data$", normalizedPath.c_str()))
     {
-        ELog.DlgMsg(mtError, "Object file does not exist: %s", normalizedPath.c_str());
-        return;
-    }
+        string256 namebuffer;
+        Scene->GenObjectName(OBJCLASS_SCENEOBJECT, namebuffer, normalizedPath.c_str());
+        CSceneObject* obj = xr_new<CSceneObject>((LPVOID)0, namebuffer);
+        CEditableObject* ref = obj->SetReference(normalizedPath.c_str());
 
-    string256 namebuffer;
-    Scene->GenObjectName(OBJCLASS_SCENEOBJECT, namebuffer, normalizedPath.c_str());
-    CSceneObject* obj = xr_new<CSceneObject>((LPVOID)0, namebuffer);
-    CEditableObject* ref = obj->SetReference(normalizedPath.c_str());
-
-    if (!ref)
-    {
-        ELog.DlgMsg(mtError, "Failed to load object: %s", normalizedPath.c_str());
-        xr_delete(obj);
-        return;
-    }
-
-    Fvector up = { 0.f, 1.f, 0.f };
-    obj->MoveTo(pos, up);
-    Scene->AppendObject(obj);
-    Scene->SelectObjects(false, OBJCLASS_SCENEOBJECT);
-    obj->Select(true);
-
-    // Update UIObjectTool with the selected item
-    ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
-    if (objTool && objTool->pForm) {
-        UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
-        if (uiObjTool) {
-            uiObjTool->SetCurrent(normalizedPath.c_str());
+        if (!ref)
+        {
+            ELog.DlgMsg(mtError, "Failed to load object at 04:35 AM EDT: %s", normalizedPath.c_str());
+            xr_delete(obj);
+            return;
         }
+
+        Fvector up = { 0.f, 1.f, 0.f };
+        obj->MoveTo(pos, up);
+        Scene->AppendObject(obj);
+        Scene->SelectObjects(false, OBJCLASS_SCENEOBJECT);
+        obj->Select(true);
+
+        // Update UIObjectTool with the selected item
+        ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
+        if (objTool && objTool->pForm) {
+            UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
+            if (uiObjTool) {
+                uiObjTool->SetCurrent(normalizedPath.c_str());
+            }
+        }
+        ELog.Msg(mtInformation, "Object added successfully at 04:35 AM EDT");
+    }
+    else
+    {
+        ELog.DlgMsg(mtError, "Object file does not exist at 04:35 AM EDT: %s", normalizedPath.c_str());
     }
 }
 
