@@ -56,8 +56,8 @@ UIContentBrowser::~UIContentBrowser()
 
 void UIContentBrowser::Draw()
 {
-    
-    
+
+
     static bool showWindow = true;
     ImGui::Begin("Content Browser", &showWindow, ImGuiWindowFlags_None);
 
@@ -217,11 +217,11 @@ void UIContentBrowser::Draw()
     {
         ImGui::OpenPopup("DeletePopup");
     }
-    
+
 
 
     ImGui::BeginChild("Content", ImVec2(0, 0), true);
-  
+
     const float tileSize = 100.0f;
     int columns = std::max(1, (int)(ImGui::GetContentRegionAvail().x / (tileSize + 10)));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 10.0f));
@@ -280,7 +280,7 @@ void UIContentBrowser::Draw()
             ImGui::EndGroup();
         }
         ImGui::EndTable();
-       
+
     }
     ImGui::PopStyleVar();
 
@@ -356,9 +356,9 @@ void UIContentBrowser::Draw()
     }
 
     m_AddButtonClicked = false;
-   
+
     ImGui::End();
-   
+
 }
 
 void UIContentBrowser::RefreshList()
@@ -367,53 +367,52 @@ void UIContentBrowser::RefreshList()
         return;
 
     m_RefreshInProgress = true;
-    m_Items.clear();
+
+    // Очистка текущего списка объектов
+    m_ObjectList->ClearList();
+
+    // Подготовка пути для перечисления файлов
+    string_path path;
+    xr_strcpy(path, m_CurrentPath.empty() ? "rawdata\\objects" : m_CurrentPath.c_str());
+
+    // Перечисление папок и файлов
+    FS_FileSet files;
+    FS.file_list(files, "$fs_root$", FS_ListFiles | FS_ListFolders, "*");
 
     ListItemsVec items;
-    FS_FileSet lst;
-    if (Lib.GetObjects(lst))
+    for (const FS_File& file : files)
     {
-        for (const auto& file : lst)
+        xr_string itemName = file.name.c_str();
+        // Применение фильтра поиска, если он есть
+        if (!m_SearchQuery.empty() && itemName.find(m_SearchQuery) == xr_string::npos)
+            continue;
+
+        // Проверка, является ли элемент папкой
+        string_path fullPath;
+        xr_strcpy(fullPath, path);
+        if (fullPath[xr_strlen(fullPath) - 1] != '\\')
+            xr_strcat(fullPath, "\\");
+        xr_strcat(fullPath, file.name.c_str());
+
+        if (FS.exist("$fs_root$", fullPath))
         {
-            xr_string relativeName = file.name;
-            if (!m_CurrentPath.empty())
-            {
-                if (relativeName.find(m_CurrentPath + "\\") != 0)
-                    continue;
-                relativeName = relativeName.substr(m_CurrentPath.length() + 1);
-            }
-
-            size_t pos = relativeName.find('\\');
-            Item item;
-            item.isFolder = pos != xr_string::npos;
-            item.name = item.isFolder ? relativeName.substr(0, pos) : relativeName;
-
-            if (!m_SearchQuery.empty() && relativeName.find(m_SearchQuery) == xr_string::npos)
-                continue;
-
-            auto it = std::find_if(m_Items.begin(), m_Items.end(),
-                [&item](const Item& i) { return i.name == item.name && i.isFolder == item.isFolder; });
-            if (it == m_Items.end())
-                m_Items.push_back(item);
-
-            if (!item.isFolder)
-                LHelper().CreateItem(items, relativeName.c_str(), 0, ListItem::flDrawThumbnail, 0);
+            EItemType itemType = (file.attrib & FILE_ATTRIBUTE_DIRECTORY) ? TYPE_FOLDER : TYPE_OBJECT;
+            ListItem* item = xr_new<ListItem>(itemType);
+            item->SetName(itemName.c_str());
+            items.push_back(item);
         }
     }
 
-    std::sort(m_Items.begin(), m_Items.end(),
-        [](const Item& a, const Item& b)
-        {
-            if (a.isFolder == b.isFolder)
-                return a.name < b.name;
-            return a.isFolder > b.isFolder;
+    // Сортировка элементов: папки первыми, затем по алфавиту
+    std::sort(items.begin(), items.end(), [](const ListItem* a, const ListItem* b) -> bool {
+        if (a->Type() != b->Type())
+            return a->Type() < b->Type();
+        return xr_strcmp(a->Key(), b->Key()) < 0;
         });
 
-    for (auto& item : m_Items)
-        if (!item.isFolder)
-            LoadThumbnail(item.name);
+    // Назначение элементов в список
+    m_ObjectList->AssignItems(items, nullptr, true, false);
 
-    m_ObjectList->AssignItems(items);
     m_RefreshInProgress = false;
 }
 
