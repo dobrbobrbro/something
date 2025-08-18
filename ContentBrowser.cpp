@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <windows.h>
 #include <commdlg.h>
+#include "..//Editors/xrEUI/imgui.h"
 
 
 UIContentBrowser::UIContentBrowser()
@@ -202,6 +203,96 @@ void UIContentBrowser::Draw()
             }
         }
     }
+    ImGui::SameLine();
+    if (ImGui::Button("Rename", ImVec2(80, 20)) && !m_SelectedItem.empty())
+    {
+        static char renameBuffer[256] = "";
+        xr_strcpy(renameBuffer, m_SelectedItem.c_str());
+        ImGui::OpenPopup("RenamePopup");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete", ImVec2(80, 20)) && !m_SelectedItem.empty())
+    {
+        ImGui::OpenPopup("DeletePopup");
+    }
+    // Rename popup
+    if (ImGui::BeginPopupModal("RenamePopup", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        static char renameBuffer[256] = "";
+        ImGui::InputText("New Name", renameBuffer, sizeof(renameBuffer));
+        if (ImGui::Button("Подтвердить"))
+        {
+            xr_string oldName = m_SelectedItem;
+            xr_string newName = renameBuffer;
+
+            xr_string fullOldPath = "E:\\HSDK\\rawdata\\objects\\" + m_CurrentPath + (m_CurrentPath.empty() ? "" : "\\") + oldName;
+            xr_string fullNewPath = "E:\\HSDK\\rawdata\\objects\\" + m_CurrentPath + (m_CurrentPath.empty() ? "" : "\\") + newName;
+
+            ELog.Msg(mtInformation, "Old path: %s", fullOldPath.c_str());
+            ELog.Msg(mtInformation, "New path: %s", fullNewPath.c_str());
+
+            if (MoveFileA(fullOldPath.c_str(), fullNewPath.c_str()))
+            {
+                m_SelectedItem = newName;
+                m_Items.clear();
+#ifdef FS_RESCAN_PATH
+                FS.rescan_path("$fs_root$");
+#endif
+                RefreshList();
+            }
+            else
+            {
+                ELog.DlgMsg(mtError, "Failed to rename %s to %s: Error %d", fullOldPath.c_str(), fullNewPath.c_str(), GetLastError());
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Отменить"))
+        {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // Delete popup
+    if (ImGui::BeginPopupModal("DeletePopup", NULL, ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        ImGui::Text("Are you sure you want to delete %s?", m_SelectedItem.c_str());
+        if (ImGui::Button("Подтвердить"))
+        {
+            xr_string fullPath = m_CurrentPath + (m_CurrentPath.empty() ? "" : "\\") + m_SelectedItem;
+            xr_string fullDeletePath = "E:\\HSDK\\rawdata\\objects\\" + fullPath;
+
+            ELog.Msg(mtInformation, "Delete path: %s", fullDeletePath.c_str());
+
+            FS_FileSet tempSet;
+            int count = FS.file_list(tempSet, fullPath.c_str(), FS_ListFolders);
+            if (count == 0)
+            {
+                if (!DeleteFileA(fullDeletePath.c_str()))
+                    ELog.DlgMsg(mtError, "Failed to delete file %s: Error %d", fullDeletePath.c_str(), GetLastError());
+            }
+            else
+            {
+                if (!RemoveDirectoryA(fullDeletePath.c_str()))
+                    ELog.DlgMsg(mtError, "Failed to delete directory %s: Error %d", fullDeletePath.c_str(), GetLastError());
+            }
+            m_SelectedItem.clear();
+            m_Items.clear();
+#ifdef FS_RESCAN_PATH
+            FS.rescan_path("$fs_root$");
+#endif
+            RefreshList();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Отмена"))
+        {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
     ImGui::BeginChild("Content", ImVec2(0, 0), true);
     const float tileSize = 100.0f;
     int columns = std::max(1, (int)(ImGui::GetContentRegionAvail().x / (tileSize + 10)));
@@ -215,40 +306,6 @@ void UIContentBrowser::Draw()
             ImGui::BeginGroup();
             ImGui::PushID(item.name.c_str());
 
-            // --- размеры общей выделяемой области (thumbnail + подпись) ---
-            const float pad = 5.0f;
-            ImVec2 selectableSize(tileSize + 2 * pad, tileSize + ImGui::GetTextLineHeightWithSpacing() + 2 * pad);
-            bool isSelected = (m_SelectedItem == item.name);
-
-            // 1) Большая выделяемая зона: СЕРАЯ ПОДСВЕТКА на всю плитку
-            if (ImGui::Selectable("##selectable",
-                isSelected,
-                ImGuiSelectableFlags_AllowDoubleClick | ImGuiSelectableFlags_AllowItemOverlap,
-                selectableSize))
-            {
-                m_SelectedItem = item.name;
-
-                // --- НЕ УДАЛЯТЬ: синхронизация с левым списком ---
-                m_ObjectList->SelectItem(item.name.c_str());
-
-                // --- НЕ УДАЛЯТЬ: обновление UIObjectTool выбранного элемента ---
-                if (ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT)))
-                    if (objTool->pForm)
-                        if (UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm))
-                            uiObjTool->SetCurrent(m_SelectedItem.c_str());
-
-                if (ImGui::IsMouseDoubleClicked(0))
-                    OnItemClicked(item.name, item.isFolder);
-            }
-
-            // 2) Рисуем содержимое ВНУТРИ выделенной зоны
-            ImVec2 rectMin = ImGui::GetItemRectMin();
-            ImVec2 cur = rectMin;         // верхний-левый угол выделения
-            cur.x += pad;
-            cur.y += pad;
-
-            // --- картинка (thumbnail) ---
-            ImGui::SetCursorScreenPos(cur);
             ImTextureID iconID = item.isFolder ? m_tFolder->surface_get() : m_TextureNull->surface_get();
             if (!item.isFolder)
             {
@@ -260,24 +317,28 @@ void UIContentBrowser::Draw()
             if (ImGui::ImageButton(iconID, ImVec2(tileSize, tileSize)))
             {
                 m_SelectedItem = item.name;
-
-                // --- НЕ УДАЛЯТЬ: синхронизация с левым списком ---
                 m_ObjectList->SelectItem(item.name.c_str());
-
-                // --- НЕ УДАЛЯТЬ: обновление UIObjectTool выбранного элемента ---
-                if (ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT)))
-                    if (objTool->pForm)
-                        if (UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm))
-                            uiObjTool->SetCurrent(m_SelectedItem.c_str());
-
-                if (!item.isFolder && !m_Selection)
-                {
-                    m_Selection = true;
+                // Update UIObjectTool with the selected item
+                ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
+                if (objTool && objTool->pForm) {
+                    UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
+                    if (uiObjTool) {
+                        uiObjTool->SetCurrent(m_SelectedItem.c_str());
+                    }
+                }
+                if (!item.isFolder) {
                     xr_string fullPath = m_CurrentPath;
-                    if (!fullPath.empty())
-                        fullPath += "\\";
+                    if (!fullPath.empty()) fullPath += "\\";
                     fullPath += item.name;
-                    UIChooseForm::SelectItem(smObject, 1, fullPath.c_str());
+                    // Validate path before setting m_PendingObject
+                    xr_string normalizedPath = fullPath;
+                    while (!normalizedPath.empty() && (normalizedPath[0] == '\\' || normalizedPath[0] == '/'))
+                        normalizedPath.erase(0, 1);
+                    std::replace(normalizedPath.begin(), normalizedPath.end(), '/', '\\');
+                    if (FS.exist("$fs_root$", normalizedPath.c_str()) || FS.exist("$game_data$", normalizedPath.c_str()))
+                    {
+                        m_PendingObject = normalizedPath;
+                    }
                 }
                 else if (item.isFolder)
                 {
@@ -285,13 +346,10 @@ void UIContentBrowser::Draw()
                 }
             }
 
-            // --- подпись под картинкой ---
-            ImGui::SetCursorScreenPos(ImVec2(cur.x, cur.y + tileSize + 2.0f));
             ImGui::TextWrapped("%s", item.name.c_str());
 
             ImGui::PopID();
             ImGui::EndGroup();
-
         }
         ImGui::EndTable();
     }
