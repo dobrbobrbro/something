@@ -1,0 +1,1147 @@
+#include "stdafx.h"
+#include "ContentBrowser.h"
+#include "../Editors/xrEProps/Tree/Choose/UIChooseForm.h"
+#include "../Editors/xrECore/Editor/Library.h"
+#include "../Editors/LevelEditor/UI/Tools/UIObjectTool.h"
+#include "../xrCore/FS.h"
+#include <algorithm>
+#include <windows.h>
+#include <commdlg.h>
+#include <cctype>
+#include <iterator>
+#include <thread>
+#include <mutex>
+#include <queue>
+
+std::queue<xr_string> thumbnailLoadQueue;
+std::mutex thumbnailMutex;
+bool thumbnailThreadRunning = false;
+
+
+
+
+xr_string UIContentBrowser::NormalizeName(xr_string s) {
+    while (!s.empty() && (s[0] == '\\' || s[0] == '/')) s.erase(0, 1);
+    std::replace(s.begin(), s.end(), '/', '\\');
+    return s;
+}
+
+bool UIContentBrowser::IsValidName(const xr_string& name) {
+    if (name.empty() || name.find_first_of("@#,`") != xr_string::npos)
+        return false;
+    for (char c : name)
+        if (!std::isalnum(c) && c != '_' && c != '\\' && c != '.')
+            return false;
+    return true;
+}
+
+bool UIContentBrowser::ResolveObjectFile(const xr_string& candidate, xr_string& outFullPath) {
+    xr_string name = NormalizeName(candidate);
+    if (!IsValidName(name)) {
+        ELog.Msg(mtError, "ResolveObjectFile: Invalid name: %s", name.c_str());
+        return false;
+    }
+    string_path tmp;
+    if (FS.exist(tmp, "$objects$", name.c_str())) {
+        outFullPath = name;
+        ELog.Msg(mtInformation, "ResolveObjectFile: Found file: %s in $objects$", name.c_str());
+        return true;
+    }
+    auto has_dot = name.find_last_of('.');
+    xr_string base = (has_dot == xr_string::npos) ? name : name.substr(0, has_dot);
+    xr_string rel = base + ".object";
+    if (FS.exist(tmp, "$objects$", rel.c_str())) {
+        outFullPath = rel;
+        ELog.Msg(mtInformation, "ResolveObjectFile: Found file: %s in $objects$", rel.c_str());
+        return true;
+    }
+    rel = base + ".lwo";
+    if (FS.exist(tmp, "$objects$", rel.c_str())) {
+        outFullPath = rel;
+        ELog.Msg(mtInformation, "ResolveObjectFile: Found file: %s in $objects$", rel.c_str());
+        return true;
+    }
+    ELog.Msg(mtError, "ResolveObjectFile: File not found: %s in $objects$", name.c_str());
+    return false;
+}
+
+UIContentBrowser* UIContentBrowser::Instance() {
+    static UIContentBrowser instance;
+    return &instance;
+}
+
+//
+UIContentBrowser::UIContentBrowser()
+{
+
+    if (!m_SearchQuery.empty()) {
+        std::strncpy(m_SearchBuffer, m_SearchQuery.c_str(), sizeof(m_SearchBuffer) - 1);
+
+        m_SearchBuffer[sizeof(m_SearchBuffer) - 1] = '\0';
+    }
+  
+
+    m_NewTagBuffer[0] = '\0';
+    m_TagDialogOpen = false;
+    m_SelectedTag.clear();
+
+    m_CurrentPath.clear();
+    m_RefreshInProgress = false;
+    m_Selection = false;
+    m_SelectedItem.clear();
+    m_SearchQuery.clear();
+    m_PendingObject.clear();
+    m_AddButtonClicked = false;
+    m_RenameDialogOpen = false;
+    m_DeleteDialogOpen = false;
+    m_NewNameBuffer[0] = '\0';
+    m_ObjectList = xr_new<UIItemListForm>();
+
+    m_tFavorite.create("ed\\bar\\rollic\\contentbrowser\\favoriteno.dds");
+    m_tFavorite->Load();
+
+    m_TextureNull.create("\\ed\\bar\\rollic\\contentbrowser\\StaticMeshActor_64");
+    m_TextureNull->Load();
+    if (FS.exist("$game_textures$", "ed\\bar\\rollic\\contentbrowser\\folder.dds"))
+        m_tFolder.create("ed\\bar\\rollic\\contentbrowser\\folder");
+    else
+        m_tFolder.create("$game_textures$\\ed\\folder");
+    m_tFolder->Load();
+
+    if (FS.exist("$game_textures$", "ed\\bar\\rollic\\contentbrowser\\folder-closed.dds"))
+        m_tFolderClosed.create("ed\\bar\\rollic\\contentbrowser\\folder-closed");
+    else
+        m_tFolderClosed.create("$game_textures$\\ed\\folder");
+    m_tFolderClosed->Load();
+
+    if (FS.exist("$game_textures$", "ed\\bar\\rollic\\contentbrowser\\folder-open.dds"))
+        m_tFolderOpen.create("ed\\bar\\rollic\\contentbrowser\\folder-open");
+    else
+        m_tFolderOpen.create("$game_textures$\\ed\\folder");
+    m_tFolderOpen->Load();
+
+    if (FS.exist("$game_textures$", "ed\\bar\\rollic\\contentbrowser\\up.dds"))
+        m_tUp.create("ed\\bar\\rollic\\contentbrowser\\up");
+    else
+        m_tUp.create("$game_textures$\\ed\\ed_nodata");
+    m_tUp->Load();
+    if (FS.exist("$game_textures$", "ed\\bar\\rollic\\contentbrowser\\down.dds"))
+        m_tDown.create("ed\\bar\\rollic\\contentbrowser\\down");
+    else
+        m_tDown.create("$game_textures$\\ed\\ed_nodata");
+    m_tDown->Load();
+    m_tAdd.create("ed\\bar\\rollic\\contentbrowser\\add");
+    m_tAdd->Load();
+    m_tRefresh.create("ed\\bar\\rollic\\contentbrowser\\refresh");
+    m_tRefresh->Load();
+    m_tRename.create("ed\\bar\\rollic\\contentbrowser\\rename");
+    m_tRename->Load();
+    if (FS.exist("$game_textures$", "ed\\bar\\rollic\\contentbrowser\\delete.dds"))
+        m_tDelete.create("ed\\bar\\rollic\\contentbrowser\\delete");
+    else
+        m_tDelete.create("$game_textures$\\ed\\ed_nodata");
+    m_tDelete->Load();
+    m_tTrashFolder.create("ed\\bar\\rollic\\contentbrowser\\trash_folder");
+    m_tTrashFolder->Load();
+
+
+
+    RefreshList();
+
+
+
+
+
+
+}
+
+UIContentBrowser::~UIContentBrowser()
+{
+    for (auto& pair : m_PreviewCache)
+        if (pair.second && pair.second != m_TextureNull->surface_get()) {}
+    m_PreviewCache.clear();
+    m_TextureNull.destroy();
+    m_tFolder.destroy();
+    m_tFolderClosed.destroy();
+    m_tFolderOpen.destroy();
+    m_tUp.destroy();
+    m_tDown.destroy();
+    m_tAdd.destroy();
+    m_tRefresh.destroy();
+    m_tRename.destroy();
+    m_tDelete.destroy();
+    m_tTrashFolder.destroy();
+    m_tFavorite.destroy();
+    xr_delete(m_ObjectList);
+}
+
+void UIContentBrowser::BuildDirectoryTree() {
+    m_DirectoryTree.children.clear();
+    m_DirectoryTree.name.clear();
+    m_DirectoryTree.isFolder = true;
+    m_DirectoryTree.fullPath.clear();
+    m_DirectoryTree.texture = m_tFolder->surface_get();
+
+    FS_FileSet lst;
+    if (Lib.GetObjects(lst)) {
+        xr_string searchLower = m_SearchQuery;
+        std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), [](char c) { return std::tolower(c); });
+
+        for (const auto& file : lst) {
+            xr_string relativeName = file.name;
+            if (!IsValidName(relativeName))
+                continue;
+
+            xr_string relativeLower = relativeName;
+            std::transform(relativeLower.begin(), relativeLower.end(), relativeLower.begin(), [](char c) { return std::tolower(c); });
+            if (!m_SearchQuery.empty() && relativeLower.find(searchLower) == xr_string::npos)
+                continue;
+
+            std::vector<xr_string> parts;
+            size_t pos = 0;
+            while ((pos = relativeName.find('\\')) != xr_string::npos) {
+                parts.push_back(relativeName.substr(0, pos));
+                relativeName.erase(0, pos + 1);
+            }
+            parts.push_back(relativeName);
+
+            DirectoryNode* current = &m_DirectoryTree;
+            xr_string currentPath;
+            for (size_t i = 0; i < parts.size(); ++i) {
+                const auto& part = parts[i];
+                if (!currentPath.empty()) currentPath += "\\";
+                currentPath += part;
+
+                if (i < parts.size() - 1) {
+                    auto it = std::find_if(current->children.begin(), current->children.end(),
+                        [&part](const DirectoryNode& node) { return node.name == part && node.isFolder; });
+                    if (it == current->children.end()) {
+                        DirectoryNode folder;
+                        folder.name = part;
+                        folder.isFolder = true;
+                        folder.fullPath = currentPath;
+                        folder.texture = (currentPath == "_trash") ? m_tTrashFolder->surface_get() : m_tFolder->surface_get();
+                        current->children.push_back(folder);
+                        current = &current->children.back();
+                    }
+                    else {
+                        current = &*it;
+                    }
+                }
+                else {
+                    bool isFolder = relativeName.find('\\') != xr_string::npos;
+                    auto it = std::find_if(current->children.begin(), current->children.end(),
+                        [&part, isFolder](const DirectoryNode& node) { return node.name == part && node.isFolder == isFolder; });
+                    if (it == current->children.end()) {
+                        DirectoryNode node;
+                        node.name = part;
+                        node.isFolder = isFolder;
+                        node.fullPath = currentPath;
+                        node.texture = isFolder ? ((currentPath == "_trash") ? m_tTrashFolder->surface_get() : m_tFolder->surface_get()) : m_TextureNull->surface_get();
+                        current->children.push_back(node);
+                    }
+                }
+            }
+        }
+    }
+
+    auto sortChildren = [](xr_vector<DirectoryNode, xalloc<DirectoryNode>>& children) {
+        std::sort(children.begin(), children.end(),
+            [](const DirectoryNode& a, const DirectoryNode& b) {
+                return a.isFolder == b.isFolder ? a.name < b.name : a.isFolder > b.isFolder;
+            });
+    };
+    std::function<void(DirectoryNode&)> sortRecursive = [&](DirectoryNode& node) {
+        sortChildren(node.children);
+        for (auto& child : node.children) {
+            if (child.isFolder) sortRecursive(child);
+        }
+    };
+    sortChildren(m_DirectoryTree.children);
+    for (auto& child : m_DirectoryTree.children) {
+        if (child.isFolder) sortRecursive(child);
+    }
+}
+
+void UIContentBrowser::DrawItem(const DirectoryNode& node, const xr_string& parentPath, float indentLevel) {
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
+    if (!node.isFolder) {
+        flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    }
+    if (m_SelectedItem == node.name) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+    if (node.isFolder && !m_SearchQuery.empty()) {
+        flags |= ImGuiTreeNodeFlags_DefaultOpen;
+    }
+
+    xr_string itemPath = parentPath.empty() ? node.name : parentPath + "\\" + node.name;
+    bool isOpen = false;
+
+    if (node.isFolder) {
+        ImGui::Image(node.fullPath == m_CurrentPath ? m_tFolderOpen->surface_get() : node.texture, ImVec2(16, 16));
+        ImGui::SameLine();
+        isOpen = ImGui::TreeNodeEx(node.name.c_str(), flags);
+    }
+    else {
+        ImTextureID imgID = m_PreviewCache.find(node.name) != m_PreviewCache.end() ? m_PreviewCache[node.name] : m_TextureNull->surface_get();
+        ImGui::Image(imgID, ImVec2(16, 16));
+        ImGui::SameLine();
+        ImGui::TreeNodeEx(node.name.c_str(), flags);
+    }
+
+    if (ImGui::IsItemClicked()) {
+        OnItemClicked(node.name, node.isFolder, itemPath);
+    }
+
+    // Add right-click context menu for tagging
+    if (!node.isFolder && ImGui::BeginPopupContextItem(node.name.c_str())) {
+        m_SelectedItem = node.name;
+        if (ImGui::MenuItem("Add Tag")) {
+            m_TagDialogOpen = true;
+            xr_strcpy(m_NewTagBuffer, "");
+        }
+        ImGui::EndPopup();
+    }
+
+    if (isOpen) {
+        for (const auto& child : node.children) {
+            DrawItem(child, itemPath, indentLevel + ImGui::GetTreeNodeToLabelSpacing());
+        }
+        ImGui::TreePop();
+    }
+}
+
+
+void UIContentBrowser::Draw() {
+
+    if (!this) return; // защита от нулевого (если Instance вернул nullptr)
+    // лучше:
+    if (m_PreviewCache.empty() && m_AvailableTags.empty()) {
+        // ничего не рисуем, контейнеры чистые
+        return;
+    }
+
+    static bool showWindow = true;
+    static float tileSize = 100.0f;
+
+    if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+        showWindow = !showWindow;
+    }
+
+    if (!showWindow) {
+        return;
+    }
+
+    ImGui::Begin("Content Browser", &showWindow, ImGuiWindowFlags_NoScrollbar);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+    ImGui::Columns(2, nullptr, true);
+    ImGui::SetColumnWidth(0, 230.0f);
+
+    {
+        ImGui::BeginChild("Object List", ImVec2(0, 0), true, ImGuiWindowFlags_NoScrollbar);
+        ImGui::BeginGroup();
+        float search_width = 208.0f;
+        ImGui::SetNextItemWidth(search_width);
+        char buffer[256] = { 0 };
+        if (!m_SearchQuery.empty()) {
+            std::strncpy(buffer, m_SearchQuery.c_str(), sizeof(buffer) - 1);
+            buffer[sizeof(buffer) - 1] = '\0';
+        }
+        if (ImGui::InputTextWithHint("##Search", "Search", m_SearchBuffer, sizeof(m_SearchBuffer))) {
+            m_SearchQuery = xr_string(m_SearchBuffer);
+            RefreshList();
+        }
+
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(search_width);
+        // Use a temporary xr_string to avoid direct c_str() calls
+        xr_string selectedTagCopy = m_SelectedTag.empty() ? "All Tags" : m_SelectedTag;
+        if (ImGui::BeginCombo("##TagFilter", selectedTagCopy.c_str())) {
+            if (ImGui::Selectable("All Tags", m_SelectedTag.empty())) {
+                m_SelectedTag.clear();
+                RefreshList();
+            }
+            for (const auto& tag : m_AvailableTags) {
+                if (tag.empty() || !IsValidName(tag)) {
+                    continue;
+                }
+                if (ImGui::Selectable(tag.c_str(), m_SelectedTag == tag)) {
+                    m_SelectedTag = tag;
+                    RefreshList();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::EndGroup();
+        ImGui::Separator();
+        ImGui::BeginChild("ScrollableList", ImVec2(0, 0), false);
+        for (const auto& node : m_DirectoryTree.children) {
+            if (node.isFolder) {
+                DrawItem(node, "", 0.0f);
+            }
+            else {
+                ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+                if (m_SelectedItem == node.name) {
+                    flags |= ImGuiTreeNodeFlags_Selected;
+                }
+                ImGui::PushID(node.name.c_str());
+                ImGui::Indent(0.0f);
+                ImGui::BeginGroup();
+                if (node.texture) { // безопасная проверка текстуры
+                    ImGui::Image(node.texture, ImVec2(20, 20));
+                }
+                else {
+                    ImGui::Dummy(ImVec2(20, 20)); // вместо null image
+                }
+                ImGui::SameLine(0.0f, 4.0f);
+                bool isOpen = ImGui::TreeNodeEx(node.name.c_str(), flags);
+                if (ImGui::IsItemClicked()) {
+                    OnItemClicked(node.name, false, "");
+                }
+                ImGui::EndGroup();
+                ImGui::Unindent(0.0f);
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::EndGroup();
+        ImGui::EndChild();
+
+        RStringVec selectedItems;
+        if (m_ObjectList->GetSelected(selectedItems) && !selectedItems.empty()) {
+            xr_string sel = selectedItems[0].c_str();
+            if (m_SelectedItem != sel && IsValidName(sel) && !sel.empty()) {
+                m_SelectedItem = sel;
+                ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
+                if (objTool && objTool->pForm) {
+                    UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
+                    if (uiObjTool) {
+                        xr_string fullPath = m_CurrentPath;
+                        if (!fullPath.empty()) fullPath += "\\";
+                        fullPath += m_SelectedItem;
+                        uiObjTool->SetCurrent(fullPath.c_str());
+                        m_PendingObject = fullPath;
+                    }
+                }
+            }
+            else {
+                m_SelectedItem.clear();
+                m_PendingObject.clear();
+            }
+        }
+    }
+
+    ImGui::NextColumn();
+    ImGui::BeginGroup();
+    if (ImGui::ImageButton(m_tUp->surface_get(), ImVec2(20, 20)) && !m_CurrentPath.empty()) {
+        // убираем возможный завершающий '\\'
+        xr_string tmp = m_CurrentPath;
+        if (!tmp.empty() && tmp.back() == '\\') tmp.pop_back();
+
+        size_t pos = tmp.find_last_of('\\');
+        m_PathHistory.push_back(m_CurrentPath);
+        m_CurrentPath = (pos == xr_string::npos) ? "" : tmp.substr(0, pos);
+
+        m_PreviewCache.clear();
+        m_CacheOrder.clear();
+        m_SelectedItem.clear();
+        m_PendingObject.clear();
+        RefreshList();
+    }
+    ImGui::SameLine(0.0f, 4.0f);
+    if (ImGui::ImageButton(m_tDown->surface_get(), ImVec2(20, 20)) && !m_PathHistory.empty()) {
+        m_CurrentPath = m_PathHistory.back();
+        m_PathHistory.pop_back();
+        m_PreviewCache.clear();
+        m_CacheOrder.clear();
+        m_SelectedItem.clear();
+        m_PendingObject.clear();
+        RefreshList();
+    }
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.059f, 0.059f, 0.059f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.208f, 0.208f, 0.208f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.753f, 0.753f, 0.753f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::BeginChild("PathDisplay", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() + 2.0f), true);
+    ImGui::Text("Path: %s", m_CurrentPath.empty() ? "Root" : m_CurrentPath.c_str());
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
+    ImGui::EndGroup();
+
+    // Tag dialog
+   // Диалог тега
+    if (m_TagDialogOpen && !m_SelectedItem.empty()) {
+        if (!m_TagPopupInit) {
+            m_TagPopupInit = true;
+            m_NewTagBuffer[0] = '\0';          // очистка один раз
+            ImGui::OpenPopup("Add Tag to Item");
+        }
+        if (ImGui::BeginPopupModal("Add Tag to Item")) {
+            ImGui::Text("Enter tag for '%s':", m_SelectedItem.c_str());
+            ImGui::InputText("##NewTag", m_NewTagBuffer, sizeof(m_NewTagBuffer));
+
+            if (ImGui::Button("OK", ImVec2(120, 0))) {
+                xr_string newTag = m_NewTagBuffer;
+                if (!newTag.empty() && IsValidName(newTag)) {
+                    AddTagToItem(m_SelectedItem, newTag);
+                    RefreshList();
+                }
+                m_TagDialogOpen = false;
+                m_TagPopupInit = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                m_TagDialogOpen = false;
+                m_TagPopupInit = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+    }
+    else {
+        m_TagPopupInit = false;
+    }
+
+
+
+    ImGui::PopStyleVar();
+    ImGui::End();
+}
+
+void UIContentBrowser::RenameItem(const xr_string& newName)
+{
+    if (m_SelectedItem.empty()) {
+        ELog.DlgMsg(mtError, "No item selected for renaming.");
+        return;
+    }
+
+    xr_string oldPath = m_CurrentPath;
+    if (!oldPath.empty()) oldPath += "\\";
+    oldPath += m_SelectedItem;
+    xr_string newPath = m_CurrentPath;
+    if (!newPath.empty()) newPath += "\\";
+    newPath += newName;
+
+    string_path oldPhysicalPath, newPhysicalPath;
+    bool isFolder = false;
+
+    xr_string normalizedOldPath = NormalizeName(oldPath);
+    xr_string normalizedNewPath = NormalizeName(newPath);
+
+    ELog.Msg(mtInformation, "RenameItem: Attempting to rename %s to %s", normalizedOldPath.c_str(), normalizedNewPath.c_str());
+
+    if (FS.exist(oldPhysicalPath, "$fs_root$", (normalizedOldPath + "\\").c_str())) {
+        isFolder = true;
+        ELog.Msg(mtInformation, "RenameItem: Item %s is a folder in $fs_root$", normalizedOldPath.c_str());
+    }
+    else {
+        xr_string resolvedOldPath;
+        if (ResolveObjectFile(normalizedOldPath, resolvedOldPath)) {
+            isFolder = false;
+            normalizedOldPath = resolvedOldPath;
+            ELog.Msg(mtInformation, "RenameItem: Resolved file path %s in $objects$", normalizedOldPath.c_str());
+        }
+        else {
+            ELog.DlgMsg(mtError, "Item does not exist: %s (checked in $fs_root$ and $objects$)", normalizedOldPath.c_str());
+            return;
+        }
+    }
+
+    if (isFolder) {
+        xr_string oldFullPath = FS.get_path("$fs_root$")->m_Path + normalizedOldPath;
+        xr_string newFullPath = FS.get_path("$fs_root$")->m_Path + normalizedNewPath;
+        if (FS.exist(newPhysicalPath, "$fs_root$", (normalizedNewPath + "\\").c_str())) {
+            ELog.DlgMsg(mtError, "Folder already exists: %s", normalizedNewPath.c_str());
+            return;
+        }
+        ELog.Msg(mtInformation, "RenameItem: Folder old path: %s, new path: %s", oldFullPath.c_str(), newFullPath.c_str());
+        if (MoveFileA(oldFullPath.c_str(), newFullPath.c_str())) {
+            m_SelectedItem = newName;
+            RefreshList();
+            ELog.Msg(mtInformation, "Folder renamed successfully: %s to %s", normalizedOldPath.c_str(), normalizedNewPath.c_str());
+        }
+        else {
+            DWORD error = GetLastError();
+            ELog.DlgMsg(mtError, "Failed to rename folder: %s to %s (Error code: %lu)", normalizedOldPath.c_str(), normalizedNewPath.c_str(), error);
+        }
+    }
+    else {
+        xr_string resolvedOldPath = normalizedOldPath;
+        size_t dotPos = resolvedOldPath.find_last_of('.');
+        xr_string extension = (dotPos != xr_string::npos) ? resolvedOldPath.substr(dotPos) : "";
+        xr_string resolvedNewPath = newName;
+        size_t newDotPos = newName.find_last_of('.');
+        if (newDotPos == xr_string::npos || (newName.substr(newDotPos) != ".object" && newName.substr(newDotPos) != ".lwo")) {
+            resolvedNewPath += extension;
+            ELog.Msg(mtInformation, "RenameItem: Appended extension %s to new path: %s", extension.c_str(), resolvedNewPath.c_str());
+        }
+        newPath = m_CurrentPath;
+        if (!newPath.empty()) newPath += "\\";
+        newPath += resolvedNewPath;
+        normalizedNewPath = NormalizeName(newPath);
+
+        xr_string oldFullPath = FS.get_path("$objects$")->m_Path + normalizedOldPath;
+        xr_string newFullPath = FS.get_path("$objects$")->m_Path + normalizedNewPath;
+        if (FS.exist(newPhysicalPath, "$objects$", normalizedNewPath.c_str())) {
+            ELog.DlgMsg(mtError, "File already exists: %s", normalizedNewPath.c_str());
+            return;
+        }
+
+        xr_string oldFileName = normalizedOldPath;
+        if (!m_CurrentPath.empty()) {
+            size_t pos = normalizedOldPath.find(m_CurrentPath + "\\");
+            if (pos == 0) {
+                oldFileName = normalizedOldPath.substr(m_CurrentPath.length() + 1);
+            }
+        }
+        xr_string newFileName = resolvedNewPath;
+        if (!m_CurrentPath.empty()) {
+            size_t pos = resolvedNewPath.find(m_CurrentPath + "\\");
+            if (pos == 0) {
+                newFileName = resolvedNewPath.substr(m_CurrentPath.length() + 1);
+            }
+        }
+        xr_string oldBaseName = m_CurrentPath;
+        if (!oldBaseName.empty()) oldBaseName += "\\";
+        oldBaseName += oldFileName.substr(0, oldFileName.find_last_of('.'));
+        xr_string newBaseName = m_CurrentPath;
+        if (!newBaseName.empty()) newBaseName += "\\";
+        newBaseName += newFileName.substr(0, newFileName.find_last_of('.'));
+        xr_string oldThmPath = oldBaseName + ".thm";
+        xr_string newThmPath = newBaseName + ".thm";
+        xr_string oldThmFullPath = FS.get_path("$objects$")->m_Path + NormalizeName(oldThmPath);
+        xr_string newThmFullPath = FS.get_path("$objects$")->m_Path + NormalizeName(newThmPath);
+        bool thmRenamed = false;
+
+        ELog.Msg(mtInformation, "RenameItem: Checking for thumbnail %s in $objects$", oldThmPath.c_str());
+        if (FS.exist(oldPhysicalPath, "$objects$", oldThmPath.c_str())) {
+            ELog.Msg(mtInformation, "RenameItem: Found thumbnail %s in $objects$", oldThmPath.c_str());
+            if (FS.exist(newPhysicalPath, "$objects$", newThmPath.c_str())) {
+                ELog.DlgMsg(mtError, "Thumbnail file already exists: %s", newThmPath.c_str());
+                return;
+            }
+            ELog.Msg(mtInformation, "RenameItem: Attempting to rename thumbnail %s to %s", oldThmFullPath.c_str(), newThmFullPath.c_str());
+            if (MoveFileA(oldThmFullPath.c_str(), newThmFullPath.c_str())) {
+                thmRenamed = true;
+                ELog.Msg(mtInformation, "Thumbnail renamed successfully: %s to %s", oldThmPath.c_str(), newThmPath.c_str());
+            }
+            else {
+                DWORD error = GetLastError();
+                ELog.DlgMsg(mtError, "Failed to rename thumbnail: %s to %s (Error code: %lu)", oldThmFullPath.c_str(), newThmFullPath.c_str(), error);
+            }
+        }
+        else {
+            ELog.Msg(mtInformation, "RenameItem: No thumbnail found for %s in $objects$", oldThmPath.c_str());
+        }
+
+        ELog.Msg(mtInformation, "RenameItem: Attempting to rename file %s to %s", oldFullPath.c_str(), newFullPath.c_str());
+        if (MoveFileA(oldFullPath.c_str(), newFullPath.c_str())) {
+            m_SelectedItem = resolvedNewPath;
+            auto it = m_PreviewCache.find(resolvedOldPath);
+            if (it != m_PreviewCache.end()) {
+                m_PreviewCache.erase(it);
+                auto cacheIt = std::find(m_CacheOrder.begin(), m_CacheOrder.end(), resolvedOldPath);
+                if (cacheIt != m_CacheOrder.end()) {
+                    m_CacheOrder.erase(cacheIt);
+                }
+            }
+            if (thmRenamed) {
+                LoadThumbnail(resolvedNewPath);
+            }
+            RefreshList();
+            ELog.Msg(mtInformation, "File renamed successfully: %s to %s", normalizedOldPath.c_str(), normalizedNewPath.c_str());
+        }
+        else {
+            DWORD error = GetLastError();
+            ELog.DlgMsg(mtError, "Failed to rename file: %s to %s (Error code: %lu)", oldFullPath.c_str(), newFullPath.c_str(), error);
+            if (thmRenamed) {
+                ELog.Msg(mtInformation, "RenameItem: Attempting to revert thumbnail rename %s to %s", newThmFullPath.c_str(), oldThmFullPath.c_str());
+                if (MoveFileA(newThmFullPath.c_str(), oldThmFullPath.c_str())) {
+                    ELog.Msg(mtInformation, "Thumbnail rename reverted: %s back to %s", newThmPath.c_str(), oldThmPath.c_str());
+                }
+                else {
+                    DWORD revertError = GetLastError();
+                    ELog.DlgMsg(mtError, "Failed to revert thumbnail rename: %s to %s (Error code: %lu)", newThmFullPath.c_str(), oldThmFullPath.c_str(), revertError);
+                }
+            }
+        }
+    }
+}
+
+void UIContentBrowser::DeleteItem()
+{
+    if (m_SelectedItem.empty()) {
+        ELog.DlgMsg(mtError, "No item selected for deletion.");
+        return;
+    }
+
+    xr_string itemPath = m_CurrentPath;
+    if (!itemPath.empty()) itemPath += "\\";
+    itemPath += m_SelectedItem;
+
+    xr_string normalizedPath = NormalizeName(itemPath);
+    ELog.Msg(mtInformation, "DeleteItem: Attempting to delete %s", normalizedPath.c_str());
+
+    xr_string trashPath = FS.get_path("$objects$")->m_Path + xr_string("_trash");
+    CreateDirectoryA(trashPath.c_str(), NULL);
+    ELog.Msg(mtInformation, "DeleteItem: Ensured _trash directory exists at %s", trashPath.c_str());
+
+    string_path oldPhysicalPath;
+    bool isFolder = false;
+
+    if (FS.exist(oldPhysicalPath, "$fs_root$", (normalizedPath + "\\").c_str())) {
+        isFolder = true;
+        ELog.Msg(mtInformation, "DeleteItem: Item %s is a folder in $fs_root$", normalizedPath.c_str());
+    }
+    else {
+        xr_string resolvedPath;
+        if (ResolveObjectFile(normalizedPath, resolvedPath)) {
+            isFolder = false;
+            normalizedPath = resolvedPath;
+            ELog.Msg(mtInformation, "DeleteItem: Resolved file path %s in $objects$", normalizedPath.c_str());
+        }
+        else {
+            ELog.DlgMsg(mtError, "Item does not exist: %s (checked in $fs_root$ and $objects$)", normalizedPath.c_str());
+            return;
+        }
+    }
+
+    xr_string oldFullPath = (isFolder ? FS.get_path("$fs_root$") : FS.get_path("$objects$"))->m_Path + normalizedPath;
+    xr_string trashDestPath = "_trash\\" + m_SelectedItem;
+    if (isFolder) {
+        trashDestPath += "\\";
+    }
+    else {
+        size_t dotPos = normalizedPath.find_last_of('.');
+        if (dotPos != xr_string::npos) {
+            trashDestPath += normalizedPath.substr(dotPos);
+        }
+    }
+    xr_string newFullPath = FS.get_path("$objects$")->m_Path + trashDestPath;
+
+    if (FS.exist(oldPhysicalPath, isFolder ? "$fs_root$" : "$objects$", trashDestPath.c_str())) {
+        ELog.DlgMsg(mtError, "Item already exists in trash: %s", trashDestPath.c_str());
+        return;
+    }
+
+    ELog.Msg(mtInformation, "DeleteItem: Moving %s to %s", oldFullPath.c_str(), newFullPath.c_str());
+    if (MoveFileA(oldFullPath.c_str(), newFullPath.c_str())) {
+        ELog.Msg(mtInformation, "DeleteItem: Successfully moved %s to %s", normalizedPath.c_str(), trashDestPath.c_str());
+
+        if (!isFolder) {
+            xr_string oldFileName = normalizedPath;
+            if (!m_CurrentPath.empty()) {
+                size_t pos = normalizedPath.find(m_CurrentPath + "\\");
+                if (pos == 0) {
+                    oldFileName = normalizedPath.substr(m_CurrentPath.length() + 1);
+                }
+            }
+            xr_string oldBaseName = m_CurrentPath;
+            if (!oldBaseName.empty()) oldBaseName += "\\";
+            oldBaseName += oldFileName.substr(0, oldFileName.find_last_of('.'));
+            xr_string oldThmPath = oldBaseName + ".thm";
+            xr_string newThmPath = "_trash\\" + m_SelectedItem.substr(0, m_SelectedItem.find_last_of('.')) + ".thm";
+            xr_string oldThmFullPath = FS.get_path("$objects$")->m_Path + NormalizeName(oldThmPath);
+            xr_string newThmFullPath = FS.get_path("$objects$")->m_Path + NormalizeName(newThmPath);
+
+            ELog.Msg(mtInformation, "DeleteItem: Checking for thumbnail %s in $objects$", oldThmPath.c_str());
+            if (FS.exist(oldPhysicalPath, "$objects$", oldThmPath.c_str())) {
+                ELog.Msg(mtInformation, "DeleteItem: Found thumbnail %s in $objects$", oldThmPath.c_str());
+                if (FS.exist(oldPhysicalPath, "$objects$", newThmPath.c_str())) {
+                    ELog.DlgMsg(mtError, "Thumbnail already exists in trash: %s", newThmPath.c_str());
+                }
+                else {
+                    ELog.Msg(mtInformation, "DeleteItem: Moving thumbnail %s to %s", oldThmFullPath.c_str(), newThmFullPath.c_str());
+                    if (MoveFileA(oldThmFullPath.c_str(), newThmFullPath.c_str())) {
+                        ELog.Msg(mtInformation, "DeleteItem: Thumbnail moved successfully: %s to %s", oldThmPath.c_str(), newThmPath.c_str());
+                    }
+                    else {
+                        DWORD error = GetLastError();
+                        ELog.DlgMsg(mtError, "DeleteItem: Failed to move thumbnail: %s to %s (Error code: %lu)", oldThmFullPath.c_str(), newThmFullPath.c_str(), error);
+                    }
+                }
+            }
+            else {
+                ELog.Msg(mtInformation, "DeleteItem: No thumbnail found for %s in $objects$", oldThmPath.c_str());
+            }
+
+            auto it = m_PreviewCache.end();
+            it = m_PreviewCache.find(normalizedPath);
+            if (it != m_PreviewCache.end()) {
+                m_PreviewCache.erase(it);
+                auto cacheIt = m_CacheOrder.end();
+                cacheIt = std::find(m_CacheOrder.begin(), m_CacheOrder.end(), normalizedPath);
+                if (cacheIt != m_CacheOrder.end()) {
+                    m_CacheOrder.erase(cacheIt);
+                }
+            }
+        }
+
+        m_SelectedItem.clear();
+        m_PendingObject.clear();
+        RefreshList();
+    }
+    else {
+        DWORD error = GetLastError();
+        ELog.DlgMsg(mtError, "DeleteItem: Failed to move %s to %s (Error code: %lu)", oldFullPath.c_str(), newFullPath.c_str(), error);
+    }
+}
+void UIContentBrowser::RefreshList() {
+    if (m_RefreshInProgress)
+        return;
+    m_RefreshInProgress = true;
+    m_Items.clear();
+    ListItemsVec items;
+    FS_FileSet lst;
+    if (Lib.GetObjects(lst)) {
+        xr_string searchLower = m_SearchQuery;
+        std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), [](char c) { return std::tolower(c); });
+
+        for (const auto& file : lst) {
+            xr_string relativeName = file.name;
+            if (!m_CurrentPath.empty()) {
+                if (relativeName.find(m_CurrentPath + "\\") != 0)
+                    continue;
+                relativeName = relativeName.substr(m_CurrentPath.length() + 1);
+            }
+            xr_string relativeLower = relativeName;
+            std::transform(relativeLower.begin(), relativeLower.end(), relativeLower.begin(), [](char c) { return std::tolower(c); });
+            if (!m_SearchQuery.empty() && relativeLower.find(searchLower) == xr_string::npos)
+                continue;
+            size_t pos = relativeName.find('\\');
+            Item item;
+            item.isFolder = pos != xr_string::npos;
+            item.name = item.isFolder ? relativeName.substr(0, pos) : relativeName;
+            if (!IsValidName(item.name))
+                continue;
+            // Load tags for the item (simulated, adjust based on your storage)
+            item.tags = GetTagsForItem(item.name); // Implement this based on your tag storage
+            if (!m_SelectedTag.empty() && !item.isFolder && std::find(item.tags.begin(), item.tags.end(), m_SelectedTag) == item.tags.end())
+                continue;
+            auto it = std::find_if(m_Items.begin(), m_Items.end(),
+                [&item](const Item& i) { return i.name == item.name && i.isFolder == item.isFolder; });
+            if (it == m_Items.end())
+                m_Items.push_back(item);
+        }
+    }
+    std::sort(m_Items.begin(), m_Items.end(),
+        [](const Item& a, const Item& b) { return a.isFolder == b.isFolder ? a.name < b.name : a.isFolder > b.isFolder; });
+
+    LoadTags(); // Update available tags
+
+    // Queue thumbnails for async loading
+    {
+        std::lock_guard<std::mutex> lock(thumbnailMutex);
+        for (auto& item : m_Items)
+            if (!item.isFolder && m_PreviewCache.find(item.name) == m_PreviewCache.end())
+                thumbnailLoadQueue.push(item.name);
+    }
+
+    // Start thumbnail loading thread if not running
+    if (!thumbnailThreadRunning) {
+        thumbnailThreadRunning = true;
+        std::thread([this]() {
+            while (true) {
+                xr_string name;
+                {
+                    std::lock_guard<std::mutex> lock(thumbnailMutex);
+                    if (thumbnailLoadQueue.empty()) {
+                        thumbnailThreadRunning = false;
+                        break;
+                    }
+                    name = thumbnailLoadQueue.front();
+                    thumbnailLoadQueue.pop();
+                }
+                LoadThumbnail(name);
+            }
+            }).detach();
+    }
+
+    m_ObjectList->AssignItems(items);
+    BuildDirectoryTree();
+    m_RefreshInProgress = false;
+}
+
+void UIContentBrowser::OnItemClicked(const xr_string& item, bool isFolder, const xr_string& itemPath)
+{
+    if (isFolder && !item.empty())
+    {
+        xr_string newPath = itemPath;
+        FS_FileSet lst;
+        if (Lib.GetObjects(lst))
+        {
+            bool pathExists = false;
+            for (const auto& file : lst)
+                if (file.name.find(newPath + "\\") == 0 || file.name == newPath)
+                {
+                    pathExists = true;
+                    break;
+                }
+            if (pathExists)
+            {
+                m_PathHistory.push_back(m_CurrentPath);
+                m_CurrentPath = newPath;
+                m_SelectedItem.clear();
+                m_PendingObject.clear();
+                RefreshList();
+            }
+        }
+    }
+    else if (!isFolder && IsValidName(item))
+    {
+        m_SelectedItem = item;
+        ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
+        if (objTool && objTool->pForm)
+            if (UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm)) {
+                xr_string fullPath = m_CurrentPath;
+                if (!fullPath.empty()) fullPath += "\\";
+                fullPath += m_SelectedItem;
+                uiObjTool->SetCurrent(fullPath.c_str());
+                m_PendingObject = fullPath;
+            }
+    }
+}
+
+void UIContentBrowser::LoadThumbnail(const xr_string& name)
+{
+    // Check cache first to avoid reloading
+    {
+        std::lock_guard<std::mutex> lock(thumbnailMutex);
+        if (m_PreviewCache.find(name) != m_PreviewCache.end())
+            return;
+    }
+
+    ImTextureID imgID = nullptr;
+
+    // Try loading PNG from previews folder, preserving subfolder structure
+    xr_string textureName = name;
+    size_t dotPos = textureName.find_last_of('.');
+    if (dotPos != xr_string::npos)
+        textureName = textureName.substr(0, dotPos);
+
+    xr_string previewPath = "previews\\" + (m_CurrentPath.empty() ? "" : m_CurrentPath + "\\") + textureName + ".png";
+    string_path physicalPath;
+    if (FS.exist(physicalPath, "$objects$", previewPath.c_str()))
+    {
+        IDirect3DBaseTexture9* pTex = nullptr;
+        HRESULT hr = D3DXCreateTextureFromFileExA(
+            HW.pDevice,
+            physicalPath,
+            256, // Width
+            256, // Height
+            1,   // MipLevels
+            0,   // Usage
+            D3DFMT_A8R8G8B8, // Format
+            D3DPOOL_MANAGED,
+            D3DX_FILTER_TRIANGLE | D3DX_FILTER_DITHER,
+            D3DX_FILTER_BOX,
+            0,   // ColorKey
+            nullptr,
+            nullptr,
+            (LPDIRECT3DTEXTURE9*)&pTex
+        );
+        if (SUCCEEDED(hr) && pTex)
+        {
+            imgID = pTex;
+            pTex->AddRef();
+            ELog.Msg(mtInformation, "LoadThumbnail: Loaded preview PNG: %s at 128x128", physicalPath);
+        }
+        else
+        {
+            ELog.DlgMsg(mtError, "LoadThumbnail: Failed to load preview PNG: %s", physicalPath);
+        }
+    }
+
+    // Fallback to existing logic if PNG not found
+    if (!imgID)
+    {
+        SChooseEvents* e = UIChooseForm::GetEvents(smObject);
+        if (e && !e->on_get_texture.empty())
+        {
+            xr_string fullPath = m_CurrentPath;
+            if (!fullPath.empty())
+                fullPath += "\\";
+            fullPath += name;
+            e->on_get_texture(fullPath.c_str(), imgID);
+        }
+    }
+
+    if (!imgID)
+    {
+        ref_texture tex;
+        xr_string basePath = m_CurrentPath;
+        if (!basePath.empty())
+            basePath += "\\";
+        basePath += textureName;
+        xr_string thmPath = basePath + ".thm";
+        xr_string ddsPath = basePath + ".dds";
+        xr_string tgaPath = basePath + ".tga";
+
+        if (FS.exist(physicalPath, "$objects$", thmPath.c_str()))
+        {
+            EImageThumbnail* thm = ImageLib.CreateThumbnail(basePath.c_str(), EImageThumbnail::ETObject);
+            if (thm)
+            {
+                thm->Update(imgID);
+                xr_delete(thm);
+            }
+        }
+        else if (FS.exist(physicalPath, "$game_textures$", ddsPath.c_str()))
+        {
+            tex.create(ddsPath.c_str());
+            imgID = tex->surface_get();
+        }
+        else if (FS.exist(physicalPath, "$game_textures$", tgaPath.c_str()))
+        {
+            tex.create(tgaPath.c_str());
+            imgID = tex->surface_get();
+        }
+    }
+
+    if (imgID)
+    {
+        std::lock_guard<std::mutex> lock(thumbnailMutex);
+        m_PreviewCache[name] = imgID;
+        m_CacheOrder.push_back(name);
+        if (m_CacheOrder.size() > 50)
+        {
+            auto oldest = m_CacheOrder.front();
+            auto oldestIt = m_PreviewCache.find(oldest);
+            if (oldestIt != m_PreviewCache.end())
+            {
+                if (oldestIt->second && oldestIt->second != m_TextureNull->surface_get())
+                {
+                    ((IDirect3DBaseTexture9*)oldestIt->second)->Release();
+                }
+                m_PreviewCache.erase(oldestIt);
+            }
+            m_CacheOrder.erase(m_CacheOrder.begin());
+        }
+    }
+}
+
+// Rest of the existing code remains unchanged...
+
+
+void UIContentBrowser::AddObjectToScene(const xr_string& itemName, const Fvector& pos)
+{
+    if (itemName.empty()) {
+        ELog.Msg(mtInformation, "AddObjectToScene: Empty itemName");
+        return;
+    }
+
+    xr_string relativePath;
+    if (!ResolveObjectFile(itemName, relativePath)) {
+        relativePath = NormalizeName(itemName);
+        ELog.Msg(mtInformation, "AddObjectToScene: Invalid path: %s", relativePath.c_str());
+        return;
+    }
+
+    string_path physicalPath;
+    if (!FS.exist(physicalPath, "$objects$", relativePath.c_str())) {
+        ELog.Msg(mtInformation, "AddObjectToScene: File not found: %s", relativePath.c_str());
+        ELog.DlgMsg(mtError, "Object file does not exist: %s", relativePath.c_str());
+        return;
+    }
+
+    xr_string objectName = relativePath;
+    size_t dotPos = objectName.find_last_of('.');
+    if (dotPos != xr_string::npos)
+        objectName = objectName.substr(0, dotPos);
+
+    string256 namebuffer;
+    Scene->GenObjectName(OBJCLASS_SCENEOBJECT, namebuffer, objectName.c_str());
+
+    CSceneObject* obj = xr_new<CSceneObject>((LPVOID)0, namebuffer);
+    CEditableObject* ref = obj->SetReference(relativePath.c_str());
+    if (!ref) {
+        ELog.Msg(mtInformation, "AddObjectToScene: Failed to load: %s", relativePath.c_str());
+        xr_delete(obj);
+        ELog.DlgMsg(mtError, "Failed to load object: %s", relativePath.c_str());
+        return;
+    }
+
+    Fvector up = { 0.f, 1.f, 0.f };
+    obj->MoveTo(pos, up);
+    Scene->AppendObject(obj);
+    Scene->SelectObjects(false, OBJCLASS_SCENEOBJECT);
+    obj->Select(true);
+
+    ELog.Msg(mtInformation, "AddObjectToScene: Added: %s", namebuffer);
+
+    ESceneObjectTool* objTool = dynamic_cast<ESceneObjectTool*>(Scene->GetTool(OBJCLASS_SCENEOBJECT));
+    if (objTool && objTool->pForm) {
+        UIObjectTool* uiObjTool = dynamic_cast<UIObjectTool*>(objTool->pForm);
+        if (uiObjTool)
+            uiObjTool->SetCurrent(relativePath.c_str());
+    }
+}
+
+bool UIContentBrowser::GetMouseScenePosition(Fvector& pos)
+{
+    Ivector2 mousePos = UI->GetRenderMousePosition();
+    Fvector start, dir;
+    EDevice->m_Camera.MouseRayFromPoint(start, dir, mousePos);
+    float dist = 1000.f;
+    Fvector hit;
+    if (Scene->RayPick(start, dir, dist, &hit, nullptr)) {
+        pos = hit;
+        return true;
+    }
+    return false;
+}
+
+
+
+// Update AddTagToItem to save tags to a file
+
+void UIContentBrowser::LoadTags() {
+    m_AvailableTags.clear();
+    for (const auto& item : m_Items) {
+        for (const auto& tag : item.tags) {
+            if (!tag.empty() && IsValidName(tag)) {
+                m_AvailableTags.insert(tag);
+            }
+        }
+    }
+    // Reset m_SelectedTag if not in m_AvailableTags
+    if (!m_SelectedTag.empty() && m_AvailableTags.find(m_SelectedTag) == m_AvailableTags.end()) {
+        m_SelectedTag.clear();
+    }
+}
+
+void UIContentBrowser::AddTagToItem(const xr_string& itemName, const xr_string& tag) {
+    if (itemName.empty() || tag.empty() || !IsValidName(tag)) {
+        return;
+    }
+    auto it = std::find_if(m_Items.begin(), m_Items.end(),
+        [&itemName](const Item& i) { return i.name == itemName && !i.isFolder; });
+    if (it != m_Items.end()) {
+        if (std::find(it->tags.begin(), it->tags.end(), tag) == it->tags.end()) {
+            it->tags.push_back(tag);
+            m_AvailableTags.insert(tag);
+        }
+    }
+}
+
+xr_vector<xr_string> UIContentBrowser::GetTagsForItem(const xr_string& itemName) {
+    xr_vector<xr_string> tags;
+    if (itemName.empty()) {
+        return tags;
+    }
+    auto it = std::find_if(m_Items.begin(), m_Items.end(),
+        [&itemName](const Item& i) { return i.name == itemName && !i.isFolder; });
+    if (it != m_Items.end()) {
+        for (const auto& tag : it->tags) {
+            if (!tag.empty() && IsValidName(tag)) {
+                tags.push_back(tag);
+            }
+        }
+    }
+    return tags;
+}
