@@ -1,0 +1,998 @@
+﻿#include "stdafx.h"
+#include "..//xrECore/Editor/UIImageEditorForm.h"
+#include "..//xrECore/Editor/ui_main.h"
+#include "..//Editors/xrEProps/UIItemListForm.h"
+#include "..//Editors/xrEProps/Tree/Choose/UIChooseForm.h"
+#include "..//UI/MyFonts.h"
+#include "..//xrEUI/imgui.h"
+
+// Глобальный кэш текстур для превью
+static xr_map<xr_string, ImTextureID> s_TexturePreviewCache;
+static xr_vector<xr_string>           s_TexturePreviewLRU;
+static const size_t                   MAX_CACHE_SIZE = 64;
+
+// Глобальный кэш превью моделей
+static xr_map<xr_string, ImTextureID> s_ModelPreviewCache;
+static xr_vector<xr_string>           s_ModelPreviewLRU;
+static const size_t                   MAX_MODEL_CACHE_SIZE = 64;
+
+// Получает текстуру из кэша или загружает её
+ImTextureID GetTexturePreview(const xr_string& textureName)
+{
+    auto it = s_TexturePreviewCache.find(textureName);
+    if (it != s_TexturePreviewCache.end())
+    {
+        s_TexturePreviewLRU.erase(std::remove(s_TexturePreviewLRU.begin(), s_TexturePreviewLRU.end(), textureName), s_TexturePreviewLRU.end());
+        s_TexturePreviewLRU.push_back(textureName);
+        return it->second;
+    }
+
+    xr_string cleanName = textureName;
+    if (cleanName.size() > 4 && cleanName.substr(cleanName.size() - 4) == ".dds")
+    {
+        cleanName = cleanName.substr(0, cleanName.size() - 4);
+    }
+
+    u32 mem = 0;
+    ImTextureID imguiTexture = RImplementation.texture_load(cleanName.c_str(), mem);
+    if (!imguiTexture)
+    {
+        Msg("* Failed to load texture: %s", cleanName.c_str());
+        return nullptr;
+    }
+
+    s_TexturePreviewCache[textureName] = imguiTexture;
+    s_TexturePreviewLRU.push_back(textureName);
+
+    if (s_TexturePreviewLRU.size() > MAX_CACHE_SIZE)
+    {
+        xr_string oldest = s_TexturePreviewLRU.front();
+        auto it = s_TexturePreviewCache.find(oldest);
+        if (it != s_TexturePreviewCache.end())
+        {
+            if (it->second)
+            {
+                IDirect3DTexture9* pTex = (IDirect3DTexture9*)it->second;
+                pTex->Release();
+            }
+            s_TexturePreviewCache.erase(it);
+        }
+        s_TexturePreviewLRU.erase(s_TexturePreviewLRU.begin());
+    }
+
+    return imguiTexture;
+}
+
+// Получает превью модели из кэша или загружает её
+ImTextureID GetModelPreview(const xr_string& modelName)
+{
+    auto it = s_ModelPreviewCache.find(modelName);
+    if (it != s_ModelPreviewCache.end())
+    {
+        s_ModelPreviewLRU.erase(std::remove(s_ModelPreviewLRU.begin(), s_ModelPreviewLRU.end(), modelName), s_ModelPreviewLRU.end());
+        s_ModelPreviewLRU.push_back(modelName);
+        return it->second;
+    }
+
+    xr_string textureName = modelName;
+    size_t dotPos = textureName.find_last_of('.');
+    if (dotPos != xr_string::npos)
+        textureName = textureName.substr(0, dotPos);
+
+    xr_string previewPath = "previews\\" + textureName + ".png";
+    string_path physicalPath;
+    ImTextureID imguiTexture = nullptr;
+    float width = 0.0f;
+    float height = 0.0f;
+
+    if (FS.exist(physicalPath, "$objects$", previewPath.c_str()))
+    {
+        D3DXIMAGE_INFO imageInfo;
+        if (SUCCEEDED(D3DXGetImageInfoFromFileA(physicalPath, &imageInfo)))
+        {
+            IDirect3DTexture9* pTex = nullptr;
+            HRESULT hr = D3DXCreateTextureFromFileExA(
+                HW.pDevice,
+                physicalPath,
+                imageInfo.Width,
+                imageInfo.Height,
+                1,
+                0,
+                D3DFMT_A8R8G8B8,
+                D3DPOOL_MANAGED,
+                D3DX_FILTER_TRIANGLE | D3DX_FILTER_DITHER,
+                D3DX_FILTER_BOX,
+                0,
+                nullptr,
+                nullptr,
+                &pTex
+            );
+            if (SUCCEEDED(hr) && pTex)
+            {
+                imguiTexture = (ImTextureID)pTex;
+                width = (float)imageInfo.Width;
+                height = (float)imageInfo.Height;
+                Msg("* Loaded preview PNG: %s", physicalPath);
+            }
+            else
+            {
+                Msg("* Failed to load PNG preview: %s, HRESULT: 0x%08X", physicalPath, hr);
+            }
+        }
+    }
+
+    if (!imguiTexture)
+    {
+        xr_string thmPath = textureName + ".thm";
+        if (FS.exist(physicalPath, "$objects$", thmPath.c_str()))
+        {
+            EImageThumbnail* thm = ImageLib.CreateThumbnail(textureName.c_str(), EImageThumbnail::ETObject);
+            if (thm)
+            {
+                thm->Update(imguiTexture);
+                width = 223.0f;
+                height = 128.0f;
+                xr_delete(thm);
+                Msg("* Loaded preview from .thm: %s", thmPath.c_str());
+            }
+        }
+    }
+
+    if (imguiTexture)
+    {
+        s_ModelPreviewCache[modelName] = imguiTexture;
+        s_ModelPreviewLRU.push_back(modelName);
+
+        if (s_ModelPreviewLRU.size() > MAX_MODEL_CACHE_SIZE)
+        {
+            xr_string oldest = s_ModelPreviewLRU.front();
+            auto it = s_ModelPreviewCache.find(oldest);
+            if (it != s_ModelPreviewCache.end())
+            {
+                if (it->second)
+                {
+                    IDirect3DTexture9* pTex = (IDirect3DTexture9*)it->second;
+                    pTex->Release();
+                }
+                s_ModelPreviewCache.erase(it);
+            }
+            s_ModelPreviewLRU.erase(s_ModelPreviewLRU.begin());
+        }
+    }
+    else
+    {
+        Msg("* Failed to load model preview for: %s", modelName.c_str());
+    }
+
+    return imguiTexture;
+}
+
+// PropValueTexturePreview — с OnDrawEvent для отрисовки
+class PropValueTexturePreview : public PropValue
+{
+    shared_str* m_pVar;
+    xr_string   m_SearchPath;
+    ref_texture m_TextureCache;
+    ImTextureID m_ImGuiTexture;
+
+public:
+    PropValueTexturePreview(shared_str* var, LPCSTR search_path)
+    {
+        m_pVar = var;
+        m_SearchPath = search_path;
+        m_ImGuiTexture = nullptr;
+        tag = 0;
+        m_Owner = nullptr;
+        OnChangeEvent = nullptr;
+    }
+
+    virtual xr_string GetDrawText(TOnDrawTextEvent OnDrawText) override
+    {
+        return xr_string("");
+    }
+
+    virtual void ResetValue() override
+    {
+    }
+
+    virtual bool Equal(PropValue* prop) override
+    {
+        return false;
+    }
+
+    static void OnDraw(void* param)
+    {
+        PropValueTexturePreview* self = (PropValueTexturePreview*)param;
+        if (!self || !self->m_pVar) return;
+
+        if (self->m_pVar->size() && (!self->m_TextureCache || xr_strcmp(self->m_TextureCache->cName, self->m_pVar->c_str()) != 0))
+        {
+            self->m_TextureCache = nullptr;
+            self->m_ImGuiTexture = nullptr;
+
+            xr_string tex_name = self->m_pVar->c_str();
+            xr_string full_path = self->m_SearchPath + tex_name;
+
+            self->m_TextureCache = EDevice->Resources->_CreateTexture(full_path.c_str());
+            if (self->m_TextureCache)
+            {
+                self->m_TextureCache->Load();
+                self->m_ImGuiTexture = self->m_TextureCache->surface_get();
+            }
+        }
+
+        ImGui::SameLine();
+        if (self->m_ImGuiTexture)
+        {
+            ImVec2 size(100, 100);
+            float avail_y = ImGui::GetFrameHeight();
+            if (avail_y > size.y)
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (avail_y - size.y) * 0.5f);
+            ImGui::Image(self->m_ImGuiTexture, size);
+        }
+        else
+        {
+            ImGui::SameLine();
+            ImGui::Text("No Preview");
+        }
+    }
+
+    virtual ~PropValueTexturePreview()
+    {
+        m_TextureCache = nullptr;
+    }
+};
+
+// ReferencePreviewDrawer — превью для Reference
+class ReferencePreviewDrawer
+{
+public:
+    static void DrawCanvas(CanvasValue* canvas)
+    {
+        if (!canvas) return;
+
+        xr_string modelNameStr = canvas->GetDrawText(nullptr);
+        if (modelNameStr.empty())
+        {
+            ImGui::Text("No Model");
+            return;
+        }
+
+        shared_str modelName = modelNameStr.c_str();
+        if (!modelName.size()) return;
+
+        ImTextureID imguiTexture = GetModelPreview(modelName.c_str());
+        if (!imguiTexture)
+        {
+            ImGui::Text("No Preview");
+            return;
+        }
+
+        ImVec2 previewSize(100, 100);
+        float rounding = 4.0f;
+        float shadowOffset = 2.0f;
+        float borderWidth = 1.0f;
+        float barHeight = 3.0f;
+
+        float avail_y = ImGui::GetFrameHeight();
+        if (avail_y > previewSize.y + barHeight + borderWidth * 2)
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (avail_y - (previewSize.y + barHeight + borderWidth * 2)) * 0.5f);
+
+        ImVec2 startPos = ImGui::GetCursorScreenPos();
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        ImVec2 shadowPos(startPos.x + shadowOffset, startPos.y + shadowOffset);
+        draw_list->AddRectFilled(
+            shadowPos,
+            ImVec2(shadowPos.x + previewSize.x + borderWidth * 2, shadowPos.y + previewSize.y + barHeight + borderWidth * 2),
+            IM_COL32(22, 22, 22, 100),
+            rounding
+        );
+
+        draw_list->AddRectFilled(
+            startPos,
+            ImVec2(startPos.x + previewSize.x + borderWidth * 2, startPos.y + previewSize.y + barHeight + borderWidth * 2),
+            IM_COL32(53, 53, 53, 255),
+            rounding
+        );
+
+        draw_list->AddRectFilled(
+            ImVec2(startPos.x, startPos.y + previewSize.y + borderWidth),
+            ImVec2(startPos.x + previewSize.x + borderWidth * 2, startPos.y + previewSize.y + borderWidth + barHeight),
+            IM_COL32(0, 255, 255, 255),
+            0.0f,
+            ImDrawFlags_RoundCornersBottom
+        );
+
+        ImGui::SetCursorScreenPos(ImVec2(startPos.x + borderWidth, startPos.y + borderWidth));
+        ImGui::Image(imguiTexture, previewSize, ImVec2(0, 0), ImVec2(1, 1), ImVec4(1, 1, 1, 1));
+
+        ImGui::SetCursorScreenPos(startPos);
+        ImGui::InvisibleButton("##RefPreview", ImVec2(previewSize.x + borderWidth * 2, previewSize.y + barHeight + borderWidth * 2));
+        if (ImGui::IsItemClicked())
+        {
+            Msg("* Reference preview clicked — model: %s", modelName.c_str());
+        }
+    }
+};
+
+// TexturePreviewDrawer
+class TexturePreviewDrawer
+{
+public:
+    static void DrawCanvas(CanvasValue* canvas)
+    {
+        if (!canvas) return;
+
+        xr_string textureNameStr = canvas->GetDrawText(nullptr);
+        if (textureNameStr.empty())
+        {
+            ImGui::Text("No Preview");
+            return;
+        }
+
+        shared_str textureName = textureNameStr.c_str();
+        if (!textureName.size()) return;
+
+        xr_string cleanName = textureName.c_str();
+        if (cleanName.size() > 4 && cleanName.substr(cleanName.size() - 4) == ".dds")
+        {
+            cleanName = cleanName.substr(0, cleanName.size() - 4);
+        }
+
+        ImTextureID imguiTexture = GetTexturePreview(cleanName);
+        if (!imguiTexture)
+        {
+            ImGui::Text("No Preview");
+            return;
+        }
+
+        ImVec2 previewSize(100, 100);
+        float rounding = 4.0f;
+        float shadowOffset = 2.0f;
+        float borderWidth = 1.0f;
+        float barHeight = 3.0f;
+
+        float avail_y = ImGui::GetFrameHeight();
+        if (avail_y > previewSize.y + barHeight + borderWidth * 2)
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (avail_y - (previewSize.y + barHeight + borderWidth * 2)) * 0.5f);
+
+        ImVec2 startPos = ImGui::GetCursorScreenPos();
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        ImVec2 shadowPos(startPos.x + shadowOffset, startPos.y + shadowOffset);
+        draw_list->AddRectFilled(
+            shadowPos,
+            ImVec2(shadowPos.x + previewSize.x + borderWidth * 2, shadowPos.y + previewSize.y + barHeight + borderWidth * 2),
+            IM_COL32(22, 22, 22, 100),
+            rounding
+        );
+
+        draw_list->AddRectFilled(
+            startPos,
+            ImVec2(startPos.x + previewSize.x + borderWidth * 2, startPos.y + previewSize.y + barHeight + borderWidth * 2),
+            IM_COL32(53, 53, 53, 255),
+            rounding
+        );
+
+        draw_list->AddRectFilled(
+            ImVec2(startPos.x, startPos.y + previewSize.y + borderWidth),
+            ImVec2(startPos.x + previewSize.x + borderWidth * 2, startPos.y + previewSize.y + borderWidth + barHeight),
+            IM_COL32(200, 192, 128, 255),
+            0.0f,
+            ImDrawFlags_RoundCornersBottom
+        );
+
+        ImGui::SetCursorScreenPos(ImVec2(startPos.x + borderWidth, startPos.y + borderWidth));
+        ImGui::Image(imguiTexture, previewSize, ImVec2(0, 0), ImVec2(1, 1), ImVec4(1, 1, 1, 1));
+
+        ImGui::SetCursorScreenPos(startPos);
+        ImGui::InvisibleButton("##ImageButton", ImVec2(previewSize.x + borderWidth * 2, previewSize.y + barHeight + borderWidth * 2));
+        if (ImGui::IsItemClicked())
+        {
+            Msg("* Preview clicked — opening ChooseForm");
+
+        }
+    }
+};
+
+
+void CSceneObject::FillProp(LPCSTR pref, PropItemVec& items)
+{
+    static shared_str occ_name = "materials\\occ";
+
+    // Вызов родительской функции
+    inherited::FillProp(pref, items);
+
+    // Reference
+    PropValue* V = PHelper().CreateChoose(items, PrepareKey(pref, "Reference"), &m_ReferenceName, smObject);
+    V->OnChangeEvent.bind(this, &CSceneObject::ReferenceChange);
+
+    CanvasValue* canvasRef = PHelper().CreateCanvas(items, PrepareKey(pref, "ReferencePreview"), m_ReferenceName, 100);
+    canvasRef->OnDrawCanvasEvent = ReferencePreviewDrawer::DrawCanvas;
+
+    // Если объект динамический, добавляем анимацию
+    if (IsDynamic())
+        inherited::AnimationFillProp(pref, items);
+
+    // Surfaces
+    SurfaceVec& s_lst = m_Surfaces;
+    shared_str Pref1 = PrepareKey(pref, "Surfaces").c_str();
+
+    // Сортировка поверхностей по имени
+    xr_vector<CSurface*> SortedSurfaces;
+    SortedSurfaces.assign(s_lst.begin(), s_lst.end());
+    std::sort(SortedSurfaces.begin(), SortedSurfaces.end(),
+        [](const CSurface* a, const CSurface* b) { return xr_strcmp(a->_Name(), b->_Name()) < 0; });
+    ImGui::Begin("My Window");
+    // Функция для рисования превью текстуры
+    auto DrawSurfacePreview = [](CanvasValue* canvas)
+    {
+        if (!canvas)
+            return;
+
+        xr_string texNameStr = canvas->GetDrawText(nullptr); // Получаем xr_string
+        if (texNameStr.empty())
+        {
+            ImGui::Text("No Preview");
+            return;
+        }
+        
+        // Если нужен shared_str
+        shared_str texShared(texNameStr.c_str());
+
+     
+        ImTextureID imguiTexture = GetTexturePreview(texNameStr); // передаём xr_string
+        if (!imguiTexture)
+        {
+            ImGui::Text("No Preview");
+            return;
+        }
+
+        ImVec2 startPos = ImGui::GetCursorScreenPos();
+        ImVec2 previewSize(100, 100);
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        // Фон превью
+        draw_list->AddRectFilled(startPos, ImVec2(startPos.x + previewSize.x, startPos.y + previewSize.y), IM_COL32(53, 53, 53, 255), 4);
+
+        // Текстура
+        ImGui::SetCursorScreenPos(startPos);
+        ImGui::Image(imguiTexture, previewSize);
+
+        // Кликабельная область
+        ImGui::SetCursorScreenPos(startPos);
+        ImGui::InvisibleButton("##ImageButton", previewSize);
+        if (ImGui::IsItemClicked())
+            Msg("* Preview clicked — opening ChooseForm");
+    };
+
+    // Перебираем поверхности
+    for (CSurface* s : SortedSurfaces)
+    {
+        if (s->m_GameMtlName == occ_name)
+            continue;
+
+        shared_str Pref2 = PrepareKey(Pref1.c_str(), s->_Name()).c_str();
+
+        // Canvas превью текстуры
+        CanvasValue* canvas = PHelper().CreateCanvas(items, PrepareKey(Pref2.c_str(), "##Xyu1TexturePreview"), *s->m_Texture, 100);
+        canvas->OnDrawCanvasEvent = DrawSurfacePreview;
+
+        // Свойства справа от превью
+        ImGui::SameLine();
+
+        V = PHelper().CreateChoose(items, PrepareKey(Pref2.c_str(), "Xyu1Texture"), &s->m_Texture, smTexture);
+        V->OnChangeEvent.bind(this, &CSceneObject::OnChangeShader);
+
+        V = PHelper().CreateChoose(items, PrepareKey(Pref2.c_str(), "Shader"), &s->m_ShaderName, smEShader);
+        V->OnChangeEvent.bind(this, &CSceneObject::OnChangeShader);
+
+        V = PHelper().CreateChoose(items, PrepareKey(Pref2.c_str(), "Compile"), &s->m_ShaderXRLCName, smCShader);
+        V->OnChangeEvent.bind(this, &CSceneObject::OnChangeSurface);
+
+        auto VA = PHelper().CreateChoose(items, PrepareKey(Pref2.c_str(), "Game Mtl"), &s->m_GameMtlName, smGameMaterial);
+        VA->OnChangeEvent.bind(this, &CSceneObject::OnChangeSurface);
+        VA->OnAfterEditEvent.bind(this, &CSceneObject::AfterEditGameMtl);
+    }
+    ImGui::End();
+    // Кнопка Clear
+    PHelper().CreateButton(items, PrepareKey(Pref1.c_str(), "Action"), "Clear", ButtonValue::flFirstOnly)
+        ->OnBtnClickEvent.bind(this, &CSceneObject::OnClickClearSurface);
+}
+
+
+void CSceneObject::OnChangeShader(PropValue* sender)
+{
+    // Cлучай, когда вызывается из UIChooseForm.
+    // m_FillParam передается в UIChooseForm::SelectItem и содержит указатель на CSurface.
+    // Проблема в том, что этот указатель может быть nullptr.
+
+    ChooseValue* prop = dynamic_cast<ChooseValue*>(sender);
+    if (!prop)
+    {
+        return;
+    }
+
+    // Получаем CSurface из члена m_FillParam
+    CSurface* S = static_cast<CSurface*>(prop->m_FillParam);
+    if (!S)
+    {
+        // Если указатель на CSurface пуст, ничего не делаем, чтобы избежать вылета.
+        // Это указывает на проблему в коде, который вызывает UIChooseForm::SelectItem,
+        // где не передается корректный указатель на CSurface.
+        return;
+    }
+
+    // Получаем новое имя текстуры из ChooseValue и преобразуем его.
+    xr_string newTextureName = prop->GetValue().c_str();
+
+    // Сравниваем и устанавливаем новую текстуру, если она изменилась.
+    bool bModified = false;
+    if (S->m_Texture.c_str() != newTextureName.c_str())
+    {
+        S->SetTexture(newTextureName.c_str());
+        bModified = true;
+    }
+
+    if (bModified)
+    {
+        Tools->UpdateProperties(true);
+    }
+}
+
+#define BLINK_TIME 300.f
+
+CSceneObject::CSceneObject(LPVOID data, LPCSTR name) : CCustomObject(data, name)
+{
+    Construct(data);
+}
+
+void CSceneObject::Construct(LPVOID data)
+{
+    FClassID = OBJCLASS_SCENEOBJECT;
+    m_ReferenceName = "";
+    m_pReference = 0;
+    m_TBBox.invalidate();
+    m_iBlinkTime = 0;
+    m_BlinkSurf = 0;
+    m_Flags.zero();
+}
+
+CSceneObject::~CSceneObject()
+{
+    for (CSurface*& i : m_Surfaces)
+    {
+        i->OnDeviceDestroy();
+        xr_delete(i);
+    }
+    Lib.RemoveEditObject(m_pReference);
+}
+
+void CSceneObject::EvictObject()
+{
+    if (m_pReference)
+        m_pReference->EvictObject();
+}
+
+void CSceneObject::Select(BOOL flag)
+{
+    inherited::Select(flag);
+    if (flag)
+        Blink();
+}
+
+int CSceneObject::GetFaceCount()
+{
+    return m_pReference ? m_pReference->GetFaceCount() : 0;
+}
+
+int CSceneObject::GetSurfFaceCount(const char* surf_name)
+{
+    return m_pReference ? m_pReference->GetSurfFaceCount(surf_name) : 0;
+}
+
+int CSceneObject::GetVertexCount()
+{
+    return m_pReference ? m_pReference->GetVertexCount() : 0;
+}
+
+void CSceneObject::OnUpdateTransform()
+{
+    inherited::OnUpdateTransform();
+    if (m_pReference)
+    {
+        m_TBBox.set(m_pReference->GetBox());
+        m_TBBox.xform(_Transform());
+    }
+}
+
+bool CSceneObject::GetBox(Fbox& box)
+{
+    if (!m_pReference)
+        return false;
+    box.set(m_TBBox);
+    return true;
+}
+
+bool CSceneObject::GetUTBox(Fbox& box)
+{
+    if (!m_pReference)
+        return false;
+    box.set(m_pReference->GetBox());
+    return true;
+}
+
+bool CSceneObject::IsRender()
+{
+    if (!m_pReference)
+        return false;
+    return inherited::IsRender();
+}
+
+void CSceneObject::Render(int priority, bool strictB2F)
+{
+    inherited::Render(priority, strictB2F);
+    if (!m_pReference)
+        return;
+#ifdef _LEVEL_EDITOR
+    Scene->SelectLightsForObject(this);
+#endif
+    m_pReference->Render(_Transform(), priority, strictB2F, &m_Surfaces);
+    if (Selected())
+    {
+        if (1 == priority)
+        {
+            if (false == strictB2F)
+            {
+                EDevice->SetShader(EDevice->m_WireShader);
+                RCache.set_xform_world(_Transform());
+                u32 clr = 0xFFFFFFFF;
+                DU_impl.DrawSelectionBoxB(m_pReference->GetBox(), &clr);
+            }
+            else
+            {
+                RenderBlink();
+            }
+        }
+    }
+}
+
+void CSceneObject::RenderBlink()
+{
+    if (m_iBlinkTime > 0)
+    {
+        if (m_iBlinkTime > (int)EDevice->dwTimeGlobal)
+        {
+            int alpha = iFloor(sqrtf(float(m_iBlinkTime - EDevice->dwTimeGlobal) / BLINK_TIME) * 64);
+            m_pReference->RenderSelection(_Transform(), 0, m_BlinkSurf, D3DCOLOR_ARGB(alpha, 255, 255, 255));
+            UI->RedrawScene();
+        }
+        else
+        {
+            m_iBlinkTime = 0;
+            m_BlinkSurf = 0;
+        }
+    }
+}
+
+void CSceneObject::RenderSingle()
+{
+    if (!m_pReference)
+        return;
+    m_pReference->RenderSingle(_Transform());
+    RenderBlink();
+}
+
+void CSceneObject::RenderBones()
+{
+    if (!m_pReference)
+        return;
+    m_pReference->RenderBones(_Transform());
+}
+
+void CSceneObject::RenderEdge(CEditableMesh* mesh, u32 color)
+{
+    if (!m_pReference)
+        return;
+    if (::Render->occ_visible(m_TBBox))
+        m_pReference->RenderEdge(_Transform(), mesh, 0, color);
+}
+
+void CSceneObject::RenderSelection(u32 color)
+{
+    if (!m_pReference)
+        return;
+    m_pReference->RenderSelection(_Transform(), 0, 0, color);
+}
+
+bool CSceneObject::FrustumPick(const CFrustum& frustum)
+{
+    if (!m_pReference)
+        return false;
+    if (::Render->occ_visible(m_TBBox))
+        return m_pReference->FrustumPick(frustum, _Transform());
+    return false;
+}
+
+bool CSceneObject::SpherePick(const Fvector& center, float radius)
+{
+    if (!m_pReference)
+        return false;
+    float fR;
+    Fvector vC;
+    m_TBBox.getsphere(vC, fR);
+    float R = radius + fR;
+    float dist_sqr = center.distance_to_sqr(vC);
+    if (dist_sqr < R * R)
+        return true;
+    return false;
+}
+
+bool CSceneObject::RayPick(float& dist, const Fvector& S, const Fvector& D, SRayPickInfo* pinf)
+{
+    if (!m_pReference)
+        return false;
+    if (::Render->occ_visible(m_TBBox))
+        if (m_pReference->RayPick(dist, S, D, _ITransform(), pinf))
+        {
+            if (pinf)
+                pinf->s_obj = this;
+            return true;
+        }
+    return false;
+}
+
+void CSceneObject::RayQuery(SPickQuery& pinf)
+{
+    if (!m_pReference)
+        return;
+    m_pReference->RayQuery(_Transform(), _ITransform(), pinf);
+}
+
+void CSceneObject::BoxQuery(SPickQuery& pinf)
+{
+    if (!m_pReference)
+        return;
+    m_pReference->BoxQuery(_Transform(), _ITransform(), pinf);
+}
+
+bool CSceneObject::BoxPick(const Fbox& box, SBoxPickInfoVec& pinf)
+{
+    if (!m_pReference)
+        return false;
+    return m_pReference->BoxPick(this, box, _ITransform(), pinf);
+}
+
+void CSceneObject::GetFullTransformToWorld(Fmatrix& m)
+{
+    m.set(_Transform());
+}
+
+void CSceneObject::GetFullTransformToLocal(Fmatrix& m)
+{
+    m.set(_ITransform());
+}
+
+CEditableObject* CSceneObject::UpdateReference()
+{
+    for (CSurface* i : m_Surfaces)
+    {
+        i->OnDeviceDestroy();
+        xr_delete(i);
+    }
+    m_Surfaces.clear();
+    Lib.RemoveEditObject(m_pReference);
+    m_pReference = (m_ReferenceName.size()) ? Lib.CreateEditObject(*m_ReferenceName) : 0;
+    UpdateTransform();
+    if (m_pReference)
+    {
+        for (size_t i = 0; i < m_pReference->SurfaceCount(); i++)
+        {
+            CSurface* surf = xr_new<CSurface>();
+            surf->CopyFrom(m_pReference->Surfaces()[i]);
+            m_Surfaces.push_back(surf);
+            if (surf->IsVoid())
+                surf->OnDeviceCreate();
+        }
+    }
+    return m_pReference;
+}
+
+CEditableObject* CSceneObject::SetReference(LPCSTR ref_name)
+{
+    m_ReferenceName = ref_name;
+    return UpdateReference();
+}
+
+void CSceneObject::OnFrame()
+{
+    inherited::OnFrame();
+    if (!m_pReference)
+        return;
+    if (m_pReference)
+        m_pReference->OnFrame();
+    if (psDeviceFlags.is(rsStatistic))
+    {
+        if (IsStatic() || IsMUStatic() || Selected())
+        {
+            EDevice->EStatistic->dwLevelSelFaceCount += GetFaceCount();
+            EDevice->EStatistic->dwLevelSelVertexCount += GetVertexCount();
+        }
+    }
+}
+
+void CSceneObject::ReferenceChange(PropValue* sender)
+{
+    Scene->BeforeObjectChange(this);
+    UpdateReference();
+
+    // После обновления ссылки, UI обновится на следующем кадре.
+    // Код отрисовки превью сам проверит, что ссылка изменилась,
+    // и загрузит новое превью, безопасно освободив старое.
+    // Ручная очистка здесь больше не нужна.
+}
+
+void CSceneObject::OnChangeSurface(PropValue* sender)
+{
+    m_Flags.set(flUseSurface, 1);
+}
+
+bool CSceneObject::AfterEditGameMtl(PropValue* sender, shared_str& str)
+{
+    return str != "materials\\occ";
+}
+
+void CSceneObject::OnClickClearSurface(ButtonValue*, bool&, bool&)
+{
+    Scene->UndoSave();
+    ClearSurface();
+}
+
+bool CSceneObject::GetSummaryInfo(SSceneSummary* inf)
+{
+    inherited::GetSummaryInfo(inf);
+    CEditableObject* E = GetReference();
+    R_ASSERT(E);
+    if (IsStatic() || IsMUStatic())
+    {
+        for (SurfaceIt s_it = E->m_Surfaces.begin(); s_it != E->m_Surfaces.end(); s_it++)
+        {
+            float area = 0.f;
+            float pixel_area = 0.f;
+            for (EditMeshIt m = E->Meshes().begin(); m != E->Meshes().end(); m++)
+            {
+                area += (*m)->CalculateSurfaceArea(*s_it, true);
+                pixel_area += (*m)->CalculateSurfacePixelArea(*s_it, true);
+            }
+            xr_string temp = ChangeFileExt(xr_string(*(*s_it)->m_Texture), "");
+            xr_strlwr(temp);
+            inf->AppendTexture(temp.c_str(), SSceneSummary::sttBase, area, pixel_area, E->m_LibName.c_str());
+        }
+        if (m_Flags.is(CEditableObject::eoUsingLOD))
+        {
+            inf->AppendTexture(E->GetLODTextureName().c_str(), SSceneSummary::sttLOD, 0, 0, "$LOD$");
+            inf->lod_objects.insert(E->m_LibName.c_str());
+            inf->object_lod_ref_cnt++;
+        }
+        if (m_Flags.is(CEditableObject::eoMultipleUsage))
+        {
+            inf->mu_objects.insert(E->m_LibName.c_str());
+            inf->object_mu_ref_cnt++;
+        }
+        inf->face_cnt += E->GetFaceCount();
+        inf->vert_cnt += E->GetVertexCount();
+    }
+    if (m_Flags.is(CEditableObject::eoHOM))
+    {
+        inf->hom_face_cnt += E->GetFaceCount();
+        inf->hom_vert_cnt += E->GetVertexCount();
+    }
+    if (m_Flags.is(CEditableObject::eoSoundOccluder))
+    {
+        inf->snd_occ_face_cnt += E->GetFaceCount();
+        inf->snd_occ_vert_cnt += E->GetVertexCount();
+    }
+    inf->AppendObject(E->GetName());
+    return true;
+}
+
+extern xr_token ECORE_API eo_type_token[];
+
+void CSceneObject::OnShowHint(AStringVec& dest)
+{
+    inherited::OnShowHint(dest);
+    dest.push_back(xr_string("Reference: ") + *m_ReferenceName);
+    dest.push_back(xr_string("-------"));
+    float dist = UI->ZFar();
+    SRayPickInfo pinf;
+    if (m_pReference->RayPick(dist, UI->m_CurrentRStart, UI->m_CurrentRDir, _ITransform(), &pinf))
+    {
+        dest.push_back(xr_string("Object Type: ") + get_token_name(eo_type_token, pinf.e_obj->m_objectFlags.flags));
+        R_ASSERT(pinf.e_mesh);
+        CSurface* surf = pinf.e_mesh->GetSurfaceByFaceID(pinf.inf.id);
+        dest.push_back(xr_string("Surface: ") + xr_string(surf->_Name()));
+        dest.push_back(xr_string("2 Sided: ") + xr_string(surf->m_Flags.is(CSurface::sf2Sided) ? "on" : "off"));
+        if (pinf.e_obj->m_objectFlags.is(CEditableObject::eoSoundOccluder))
+        {
+            dest.push_back(xr_string("Game Mtl: ") + xr_string(surf->_GameMtlName()));
+            int gm_id = surf->_GameMtl();
+            if (gm_id != GAMEMTL_NONE_ID)
+            {
+                SGameMtl* mtl = GameMaterialLibrary->GetMaterialByID(gm_id);
+                if (mtl)
+                    dest.push_back(xr_string().sprintf("Occlusion Factor: %3.2f", mtl->fSndOcclusionFactor));
+            }
+        }
+        else if (pinf.e_obj->m_objectFlags.is(CEditableObject::eoHOM))
+        {
+        }
+        else
+        {
+            dest.push_back(xr_string("XyuTexture: ") + xr_string(surf->_Texture()));
+            dest.push_back(xr_string("Shader: ") + xr_string(surf->_ShaderName()));
+            dest.push_back(xr_string("LC Shader: ") + xr_string(surf->_ShaderXRLCName()));
+            dest.push_back(xr_string("Game Mtl: ") + xr_string(surf->_GameMtlName()));
+        }
+    }
+}
+
+void CSceneObject::Blink(CSurface* surf)
+{
+    m_BlinkSurf = surf;
+    m_iBlinkTime = EDevice->dwTimeGlobal + BLINK_TIME + EDevice->dwTimeDelta;
+}
+
+bool CSceneObject::Validate(bool bMsg)
+{
+    CEditableObject* E = GetReference();
+    R_ASSERT(E);
+    return E->Validate();
+}
+
+void CSceneObject::ClearSurface()
+{
+    for (CSurface* i : m_Surfaces)
+    {
+        i->OnDeviceDestroy();
+        xr_delete(i);
+    }
+    m_Surfaces.clear_and_free();
+    if (m_pReference)
+    {
+        for (size_t i = 0; i < m_pReference->SurfaceCount(); i++)
+        {
+            CSurface* surf = xr_new<CSurface>();
+            surf->CopyFrom(m_pReference->Surfaces()[i]);
+            m_Surfaces.push_back(surf);
+            if (surf->IsVoid())
+                surf->OnDeviceCreate();
+        }
+    }
+    m_Flags.set(flUseSurface, 0);
+    Tools->UpdateProperties();
+
+    // Очищаем кэш превью текстур
+    for (auto& it : s_TexturePreviewCache)
+    {
+        if (it.second)
+        {
+            IDirect3DTexture9* pTex = (IDirect3DTexture9*)it.second;
+            pTex->Release();
+        }
+    }
+    s_TexturePreviewCache.clear();
+    s_TexturePreviewLRU.clear();
+
+    // Очищаем кэш превью моделей
+    for (auto& it : s_ModelPreviewCache)
+    {
+        if (it.second)
+        {
+            IDirect3DTexture9* pTex = (IDirect3DTexture9*)it.second;
+            pTex->Release();
+        }
+    }
+    s_ModelPreviewCache.clear();
+    s_ModelPreviewLRU.clear();
+}
