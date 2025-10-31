@@ -1,0 +1,626 @@
+// MyChooseForm.h
+#pragma once
+#include "..\xrEUI\imgui.h"
+#include "..\Public\PropertiesListTypes.h"
+#include "PreviewUtils.h"
+#include <functional>
+#include <algorithm>
+#include <map>
+#include <set>
+
+struct SChooseItem;
+using ChooseItemVec = xr_vector<SChooseItem>;
+
+// Структура узла дерева
+struct DirectoryNode {
+    std::string name;
+    std::string fullPath;
+    bool isFolder = false;
+    ImTextureID texture = nullptr;
+    std::vector<DirectoryNode> children;
+    SChooseItem* object = nullptr;
+    bool expanded = false;
+};
+
+// Простая структура для хранения свойств
+struct PropertyItem {
+    std::string name;
+    std::string value;
+};
+
+class CMyChooseForm {
+private:
+    bool m_bOpen = false;
+    std::string m_Title;
+    ChooseItemVec m_Items;
+    std::string m_CurrentSelection;
+    std::function<void(const char*)> m_OnSelectCallback;
+    ImGuiTextFilter m_Filter;
+    bool m_bFocused = false;
+    DirectoryNode m_DirectoryTree;
+    ImTextureID m_PreviewTexture = nullptr;
+    UIPropertiesForm* m_Props = nullptr;
+    bool m_ShowOnlyFiltered = false;
+    float m_PreviewScale = 1.0f;
+    std::vector<PropertyItem> m_Properties;
+
+    // Иконки для папок и файлов
+    ImTextureID m_FolderClosedIcon = nullptr;
+    ImTextureID m_FolderOpenIcon = nullptr;
+    ImTextureID m_FileIcon = nullptr;
+    ImTextureID m_TextureIcon = nullptr;
+    ImTextureID m_ModelIcon = nullptr;
+    ImTextureID m_SoundIcon = nullptr;
+
+    void LoadIcons() {
+        static bool iconsLoaded = false;
+        if (!iconsLoaded) {
+            m_FolderClosedIcon = GetTexturePreview("ed\\folder-closed");
+            if (!m_FolderClosedIcon) m_FolderClosedIcon = GetTexturePreview("gamedata\\textures\\ed\\folder-closed");
+            if (!m_FolderClosedIcon) m_FolderClosedIcon = GetTexturePreview("editor\\folder-closed");
+
+            m_FolderOpenIcon = GetTexturePreview("ed\\folder-open");
+            if (!m_FolderOpenIcon) m_FolderOpenIcon = GetTexturePreview("gamedata\\textures\\ed\\folder-open");
+            if (!m_FolderOpenIcon) m_FolderOpenIcon = GetTexturePreview("editor\\folder-open");
+
+            m_FileIcon = GetTexturePreview("ed\\file");
+            if (!m_FileIcon) m_FileIcon = GetTexturePreview("gamedata\\textures\\ed\\file");
+            if (!m_FileIcon) m_FileIcon = GetTexturePreview("editor\\file");
+
+            m_TextureIcon = GetTexturePreview("ed\\textureicon");
+            if (!m_TextureIcon) m_TextureIcon = GetTexturePreview("gamedata\\textures\\ed\\textureicon");
+            if (!m_TextureIcon) m_TextureIcon = GetTexturePreview("editor\\textureicon");
+            if (!m_TextureIcon) m_TextureIcon = m_FileIcon;
+
+            m_ModelIcon = GetTexturePreview("ed\\staticmesh");
+            if (!m_ModelIcon) m_ModelIcon = GetTexturePreview("gamedata\\textures\\ed\\staticmesh");
+            if (!m_ModelIcon) m_ModelIcon = GetTexturePreview("editor\\staticmesh");
+            if (!m_ModelIcon) m_ModelIcon = m_FileIcon;
+
+            m_SoundIcon = GetTexturePreview("ed\\soundicon");
+            if (!m_SoundIcon) m_SoundIcon = GetTexturePreview("gamedata\\textures\\ed\\soundicon");
+            if (!m_SoundIcon) m_SoundIcon = GetTexturePreview("editor\\soundicon");
+            if (!m_SoundIcon) m_SoundIcon = m_FileIcon;
+
+            iconsLoaded = true;
+        }
+    }
+
+    ImTextureID GetFileIcon(const std::string& filename) {
+        std::string extension = GetFileExtension(filename);
+
+        if (IsTextureFile(extension)) {
+            return m_TextureIcon ? m_TextureIcon : m_FileIcon;
+        }
+        else if (IsModelFile(extension)) {
+            return m_ModelIcon ? m_ModelIcon : m_FileIcon;
+        }
+        else if (IsSoundFile(extension)) {
+            return m_SoundIcon ? m_SoundIcon : m_FileIcon;
+        }
+        else {
+            return m_FileIcon;
+        }
+    }
+
+    std::string GetFileExtension(const std::string& filename) {
+        size_t dotPos = filename.find_last_of('.');
+        if (dotPos != std::string::npos) {
+            std::string ext = filename.substr(dotPos + 1);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            return ext;
+        }
+        return "";
+    }
+
+    bool IsTextureFile(const std::string& extension) {
+        static std::set<std::string> textureExtensions = { "dds", "tga", "bmp", "png", "jpg", "jpeg" };
+        return textureExtensions.find(extension) != textureExtensions.end();
+    }
+
+    bool IsModelFile(const std::string& extension) {
+        static std::set<std::string> modelExtensions = { "ogf", "object", "dm" };
+        return modelExtensions.find(extension) != modelExtensions.end();
+    }
+
+    bool IsSoundFile(const std::string& extension) {
+        static std::set<std::string> soundExtensions = { "wav", "ogg", "mp3" };
+        return soundExtensions.find(extension) != soundExtensions.end();
+    }
+
+    void BuildDirectoryTree() {
+        m_DirectoryTree.children.clear();
+        m_DirectoryTree.name.clear();
+        m_DirectoryTree.isFolder = true;
+        m_DirectoryTree.fullPath.clear();
+        m_DirectoryTree.texture = m_FolderClosedIcon;
+        m_DirectoryTree.expanded = false;
+
+        for (const auto& item : m_Items) {
+            std::string relativeName = item.name.c_str();
+            if (relativeName.empty()) continue;
+
+            // Применяем фильтр
+            if (m_Filter.IsActive() && !m_Filter.PassFilter(relativeName.c_str())) {
+                continue;
+            }
+
+            // Разбиваем путь на части
+            std::vector<std::string> parts;
+            size_t pos = 0;
+            while ((pos = relativeName.find('\\')) != std::string::npos) {
+                parts.push_back(relativeName.substr(0, pos));
+                relativeName.erase(0, pos + 1);
+            }
+            parts.push_back(relativeName);
+
+            // Строим дерево
+            DirectoryNode* current = &m_DirectoryTree;
+            std::string currentPath;
+            for (size_t i = 0; i < parts.size(); ++i) {
+                const auto& part = parts[i];
+                if (!currentPath.empty()) currentPath += "\\";
+                currentPath += part;
+
+                if (i < parts.size() - 1) {
+                    // Папка
+                    auto it = std::find_if(current->children.begin(), current->children.end(),
+                        [&part](const DirectoryNode& node) { return node.name == part && node.isFolder; });
+                    if (it == current->children.end()) {
+                        DirectoryNode folder;
+                        folder.name = part;
+                        folder.isFolder = true;
+                        folder.fullPath = currentPath;
+                        folder.texture = m_FolderClosedIcon;
+                        folder.expanded = false;
+                        current->children.push_back(folder);
+                        current = &current->children.back();
+                    }
+                    else {
+                        current = &(*it);
+                    }
+                }
+                else {
+                    // Файл
+                    bool isFolder = false;
+                    auto it = std::find_if(current->children.begin(), current->children.end(),
+                        [&part, isFolder](const DirectoryNode& node) { return node.name == part && node.isFolder == isFolder; });
+                    if (it == current->children.end()) {
+                        DirectoryNode node;
+                        node.name = part;
+                        node.isFolder = isFolder;
+                        node.fullPath = currentPath;
+                        node.texture = GetFileIcon(currentPath);
+                        node.object = const_cast<SChooseItem*>(&item);
+                        current->children.push_back(node);
+                    }
+                }
+            }
+        }
+
+        // Сортируем дерево
+        auto sortChildren = [](std::vector<DirectoryNode>& children) {
+            std::sort(children.begin(), children.end(),
+                [](const DirectoryNode& a, const DirectoryNode& b) {
+                    if (a.isFolder != b.isFolder)
+                        return a.isFolder > b.isFolder;
+                    return a.name < b.name;
+                });
+        };
+
+        std::function<void(DirectoryNode&)> sortRecursive = [&](DirectoryNode& node) {
+            sortChildren(node.children);
+            for (auto& child : node.children) {
+                if (child.isFolder) sortRecursive(child);
+            }
+        };
+
+        sortChildren(m_DirectoryTree.children);
+        for (auto& child : m_DirectoryTree.children) {
+            if (child.isFolder) sortRecursive(child);
+        }
+    }
+
+    void DrawItem(DirectoryNode& node) {
+        if (!ShouldDisplayItem(node)) return;
+
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick;
+        if (!node.isFolder) {
+            flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        }
+
+        if (node.isFolder && node.expanded) {
+            flags |= ImGuiTreeNodeFlags_DefaultOpen;
+        }
+
+        bool isSelected = (!node.isFolder && node.object && m_CurrentSelection == node.object->name.c_str());
+        if (isSelected) {
+            flags |= ImGuiTreeNodeFlags_Selected;
+        }
+
+        // Ключевое изменение: используем тот же подход что и в ContentBrowser
+        // Сначала выбираем иконку, затем рисуем TreeNode с иконкой и текстом вместе
+        ImTextureID icon = node.isFolder ?
+            (node.expanded ? m_FolderOpenIcon : m_FolderClosedIcon) :
+            node.texture;
+
+        // Рисуем TreeNode с иконкой и текстом - так же как в ContentBrowser
+        bool isOpen;
+        if (icon) {
+            // Комбинируем иконку и текст в label
+            std::string label = "  " + node.name; // Добавляем отступ для иконки
+            isOpen = ImGui::TreeNodeEx(node.name.c_str(), flags, "%s", label.c_str());
+
+            // Рисуем иконку поверх TreeNode
+            ImVec2 cursorPos = ImGui::GetItemRectMin();
+            cursorPos.x += 2; // Небольшой отступ слева
+            cursorPos.y += 2; // Выравнивание по вертикали
+
+            ImGui::GetWindowDrawList()->AddImage(
+                icon,
+                cursorPos,
+                ImVec2(cursorPos.x + 16, cursorPos.y + 16)
+            );
+        }
+        else {
+            // Fallback без иконки
+            isOpen = ImGui::TreeNodeEx(node.name.c_str(), flags, "%s", node.name.c_str());
+        }
+
+        // Обработка кликов - работает на всей области TreeNode
+        if (ImGui::IsItemClicked()) {
+            if (node.isFolder) {
+                // Для папок - переключаем состояние при клике
+                node.expanded = !node.expanded;
+            }
+            else if (node.object) {
+                // Для файлов - выбираем
+                m_CurrentSelection = node.object->name.c_str();
+                UpdatePreview(m_CurrentSelection);
+                UpdateProperties(m_CurrentSelection);
+            }
+        }
+
+        // Рисуем детей если папка открыта
+        if (isOpen && node.isFolder) {
+            for (auto& child : node.children) {
+                DrawItem(child);
+            }
+            ImGui::TreePop();
+        }
+    }
+
+    bool ShouldDisplayItem(const DirectoryNode& node) {
+        if (!m_Filter.IsActive()) return true;
+
+        if (m_Filter.PassFilter(node.name.c_str())) return true;
+
+        // Для папок: показываем если есть совпадения в детях
+        if (node.isFolder && !m_ShowOnlyFiltered) {
+            for (const auto& child : node.children) {
+                if (ShouldDisplayItem(child)) return true;
+            }
+        }
+        return false;
+    }
+
+    void ExpandCollapseAll(DirectoryNode& node, bool expand) {
+        node.expanded = expand;
+        for (auto& child : node.children) {
+            if (child.isFolder) {
+                ExpandCollapseAll(child, expand);
+            }
+        }
+    }
+
+    ImVec2 CalculateCenterPosition(const ImVec2& availableSize, const ImVec2& elementSize) {
+        return ImVec2(
+            (availableSize.x - elementSize.x) * 0.5f,
+            (availableSize.y - elementSize.y) * 0.5f
+        );
+    }
+
+    void UpdateProperties(const std::string& name) {
+        m_Properties.clear();
+
+        if (name.empty()) return;
+
+        std::string extension = GetFileExtension(name);
+        std::string filename = GetFileName(name);
+
+        AddProperty("Name", filename.c_str());
+        AddProperty("Full Path", name.c_str());
+        AddProperty("Type", GetFileTypeDescription(extension).c_str());
+        AddProperty("Extension", extension.c_str());
+
+        if (IsTextureFile(extension)) {
+            UpdateTextureProperties(name);
+        }
+        else if (IsModelFile(extension)) {
+            UpdateModelProperties(name);
+        }
+        else if (IsSoundFile(extension)) {
+            UpdateSoundProperties(name);
+        }
+        else {
+            UpdateGenericProperties(name);
+        }
+    }
+
+    void AddProperty(const std::string& name, const std::string& value) {
+        m_Properties.push_back({ name, value });
+    }
+
+    std::string GetFileName(const std::string& path) {
+        size_t slashPos = path.find_last_of('\\');
+        if (slashPos != std::string::npos) {
+            return path.substr(slashPos + 1);
+        }
+        return path;
+    }
+
+    std::string GetFileTypeDescription(const std::string& extension) {
+        static std::map<std::string, std::string> typeMap = {
+            {"dds", "Texture (DDS)"}, {"tga", "Texture (TGA)"}, {"bmp", "Texture (BMP)"},
+            {"png", "Texture (PNG)"}, {"jpg", "Texture (JPG)"}, {"jpeg", "Texture (JPEG)"},
+            {"ogf", "3D Model (OGF)"}, {"object", "3D Model (OBJECT)"}, {"dm", "3D Model (DM)"},
+            {"omf", "Skeleton (OMF)"}, {"skl", "Skeleton (SKL)"}, {"bones", "Skeleton (BONES)"},
+            {"anm", "Animation (ANM)"}, {"wav", "Sound (WAV)"}, {"ogg", "Sound (OGG)"},
+            {"mp3", "Sound (MP3)"}, {"script", "Script"}, {"ltx", "Configuration (LTX)"}
+        };
+
+        auto it = typeMap.find(extension);
+        if (it != typeMap.end()) return it->second;
+        return "Unknown File";
+    }
+
+    void UpdateTextureProperties(const std::string& name) {
+        AddProperty("Format", "DXT5");
+        AddProperty("Width", "1024");
+        AddProperty("Height", "1024");
+        AddProperty("Mip Levels", "10");
+        AddProperty("Memory Usage", "2.67 MB");
+        AddProperty("Alpha Channel", "Yes");
+        AddProperty("Compressed", "Yes");
+    }
+
+    void UpdateModelProperties(const std::string& name) {
+        AddProperty("Vertices", "15,248");
+        AddProperty("Faces", "12,144");
+        AddProperty("Materials", "3");
+        AddProperty("LODs", "2");
+        AddProperty("Bones", "26");
+        AddProperty("Animation", "Yes");
+        AddProperty("File Size", "1.45 MB");
+        AddProperty("Bounds", "2.4x1.8x3.2 m");
+    }
+
+    void UpdateSoundProperties(const std::string& name) {
+        AddProperty("Duration", "0:45");
+        AddProperty("Sample Rate", "44100 Hz");
+        AddProperty("Channels", "Stereo");
+        AddProperty("Bitrate", "192 kbps");
+        AddProperty("Format", "OGG Vorbis");
+    }
+
+    void UpdateGenericProperties(const std::string& name) {
+        AddProperty("File Size", "Unknown");
+        AddProperty("Last Modified", "2024-01-15 14:30");
+        AddProperty("Attributes", "Read Only");
+    }
+
+    void DrawProperties() {
+        if (m_Properties.empty()) {
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "No properties available");
+            return;
+        }
+
+        if (ImGui::BeginTable("PropertiesTable", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+            ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+
+            for (const auto& prop : m_Properties) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "%s", prop.name.c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%s", prop.value.c_str());
+            }
+
+            ImGui::EndTable();
+        }
+    }
+
+public:
+    static CMyChooseForm& GetInstance() {
+        static CMyChooseForm inst;
+        return inst;
+    }
+
+    void Open(const char* title, const ChooseItemVec& items, const char* current, std::function<void(const char*)> cb) {
+        m_Title = title ? title : "";
+        m_Items = items;
+        m_CurrentSelection = current ? current : "";
+        m_OnSelectCallback = cb;
+        m_bOpen = true;
+        m_bFocused = true;
+        m_Filter.Clear();
+        m_ShowOnlyFiltered = false;
+        m_PreviewScale = 1.0f;
+        m_Properties.clear();
+
+        LoadIcons();
+
+        if (!m_Props) m_Props = xr_new<UIPropertiesForm>();
+        if (m_Props) m_Props->ClearProperties();
+        BuildDirectoryTree();
+        UpdatePreview(m_CurrentSelection);
+        UpdateProperties(m_CurrentSelection);
+    }
+
+    void Close() {
+        m_bOpen = false;
+        m_OnSelectCallback = nullptr;
+        m_PreviewTexture = nullptr;
+        m_Properties.clear();
+    }
+
+    void UpdatePreview(const std::string& name) {
+        if (name.empty()) { m_PreviewTexture = nullptr; return; }
+        m_PreviewTexture = GetModelPreview(name.c_str());
+        if (!m_PreviewTexture) m_PreviewTexture = GetTexturePreview(name.c_str());
+    }
+
+    void Render() {
+        if (!m_bOpen) return;
+
+        ImGui::SetNextWindowSize(ImVec2(1200, 800), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(1000, 700), ImGui::GetIO().DisplaySize);
+
+        if (!ImGui::Begin(m_Title.c_str(), &m_bOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar)) {
+            Close();
+            return;
+        }
+
+        if (ImGui::BeginMenuBar()) {
+            if (ImGui::BeginMenu("View")) {
+                if (ImGui::MenuItem("Expand All", "Ctrl+E")) {
+                    ExpandCollapseAll(m_DirectoryTree, true);
+                }
+                if (ImGui::MenuItem("Collapse All", "Ctrl+Shift+E")) {
+                    ExpandCollapseAll(m_DirectoryTree, false);
+                }
+                ImGui::Separator();
+                ImGui::MenuItem("Show Only Filtered Results", nullptr, &m_ShowOnlyFiltered);
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenuBar();
+        }
+
+        const float footer_height = ImGui::GetFrameHeightWithSpacing() + 27;
+        ImGui::BeginChild("MainContent", ImVec2(0, -footer_height), true);
+
+        ImGui::Columns(2, "MainColumns", true);
+        ImGui::SetColumnWidth(0, 500);
+
+        ImGui::BeginChild("LeftColumn", ImVec2(0, 0), true);
+
+        ImGui::Text("Find:");
+        ImGui::SameLine();
+        if (m_bFocused) {
+            ImGui::SetKeyboardFocusHere();
+            m_bFocused = false;
+        }
+        m_Filter.Draw("##filter", ImGui::GetContentRegionAvail().x - 120);
+
+        ImGui::SameLine();
+        ImGui::Checkbox("Filtered", &m_ShowOnlyFiltered);
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            m_Filter.Clear();
+            BuildDirectoryTree();
+        }
+
+        ImGui::Separator();
+
+        if (ImGui::BeginChild("TreeView", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() - 10), true)) {
+            for (auto& child : m_DirectoryTree.children) {
+                DrawItem(child);
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::Text("Selected: %s", m_CurrentSelection.empty() ? "None" : m_CurrentSelection.c_str());
+
+        ImGui::EndChild();
+        ImGui::NextColumn();
+
+        ImGui::BeginChild("RightColumn", ImVec2(0, 0), true);
+
+        ImGui::BeginChild("PreviewPanel", ImVec2(0, 532), true);
+        ImGui::Text("Preview (512x512)");
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 150);
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("##scale", &m_PreviewScale, 0.1f, 2.0f, "Scale: %.1f");
+
+        ImGui::Separator();
+
+        ImGui::BeginChild("PreviewContent", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+
+        ImVec2 previewSize(512 * m_PreviewScale, 512 * m_PreviewScale);
+        ImTextureID tex = m_PreviewTexture ? m_PreviewTexture : GetNullPreview();
+        ImVec2 availableSize = ImGui::GetContentRegionAvail();
+
+        if (tex) {
+            ImVec2 centerPos = CalculateCenterPosition(availableSize, previewSize);
+            ImGui::SetCursorPos(centerPos);
+            ImGui::Image(tex, previewSize);
+        }
+        else {
+            ImVec2 textSize = ImGui::CalcTextSize("No preview available");
+            ImVec2 centerPos = CalculateCenterPosition(availableSize, textSize);
+            ImGui::SetCursorPos(centerPos);
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "No preview available");
+        }
+        ImGui::EndChild();
+        ImGui::EndChild();
+
+        ImGui::BeginChild("PropsPanel", ImVec2(0, 0), true);
+        ImGui::Text("Properties");
+        ImGui::Separator();
+        DrawProperties();
+        ImGui::EndChild();
+
+        ImGui::EndChild();
+
+        ImGui::EndChild();
+        ImGui::Columns(1);
+
+        ImGui::Separator();
+        DrawFooter();
+
+        ImGui::End();
+    }
+
+    void DrawFooter() {
+        ImGui::BeginChild("Footer", ImVec2(0, 0), false);
+
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 7);
+
+        float btnW = 130, spacing = ImGui::GetStyle().ItemSpacing.x;
+        float totalW = 2 * btnW + spacing;
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - totalW) * 0.5f);
+
+        bool disabled = m_CurrentSelection.empty();
+        if (disabled) ImGui::BeginDisabled();
+
+        if (ImGui::Button("OK", ImVec2(btnW, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+            if (m_OnSelectCallback && !m_CurrentSelection.empty()) {
+                m_OnSelectCallback(m_CurrentSelection.c_str());
+            }
+            Close();
+        }
+
+        if (disabled) ImGui::EndDisabled();
+        ImGui::SameLine();
+
+        if (ImGui::Button("Cancel", ImVec2(btnW, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            Close();
+        }
+
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "%zu items", m_Items.size());
+
+        ImGui::EndChild();
+    }
+
+    bool IsOpen() const { return m_bOpen; }
+
+private:
+    ImTextureID GetNullPreview() {
+        static ImTextureID nullTex = nullptr;
+        if (!nullTex) nullTex = GetTexturePreview("editor\\wireframe");
+        return nullTex;
+    }
+};
